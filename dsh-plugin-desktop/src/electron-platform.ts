@@ -82,7 +82,7 @@ class LinuxPlatformStrategy implements ElectronPlatformStrategy {
   readonly platform = 'linux'
   readonly updateDownloadPlatform = undefined
   readonly canPickDirectory = false
-  readonly canToggleShellMode = false
+  readonly canToggleShellMode = true
 
   configureApplication(
     _icon: NativeImage,

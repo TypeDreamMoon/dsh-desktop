@@ -786,7 +786,7 @@ describe('Electron desktop runtime', () => {
     expect(electron.trays[0]?.off).toHaveBeenCalledWith('click', expect.any(Function))
   })
 
-  it('selects the restricted Linux platform adapter once for native capabilities', async () => {
+  it('selects the Linux platform adapter once for native capabilities', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
     electron.app.isPackaged = true
     const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
@@ -803,7 +803,7 @@ describe('Electron desktop runtime', () => {
     expect(electron.Menu.setApplicationMenu).not.toHaveBeenCalled()
     expect(electron.browserWindows[0]?.removeMenu).not.toHaveBeenCalled()
     expect(electron.menuTemplates[0]).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'Mode: Compatibility Mode', enabled: false }),
+      expect.objectContaining({ label: 'Mode: Compatibility Mode', enabled: true }),
     ]))
 
     await release()
@@ -1759,7 +1759,7 @@ describe('Electron desktop runtime', () => {
       ['compatibility', 'en'], ['compatibility', 'zh'],
       ['extended', 'en'], ['extended', 'zh'],
       ['advanced', 'en'], ['advanced', 'zh'],
-    ].filter(([mode]) => platform !== 'linux' || mode === 'compatibility') as Array<['compatibility' | 'extended' | 'advanced', 'en' | 'zh']>)('lists all modes with %s selected (%s)', async (mode, locale) => {
+    ] as Array<['compatibility' | 'extended' | 'advanced', 'en' | 'zh']>)('lists all modes with %s selected (%s)', async (mode, locale) => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
       const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
       const requestModeChange = vi.fn(async () => {})
@@ -1774,7 +1774,7 @@ describe('Electron desktop runtime', () => {
       const menu = electron.menuTemplates.at(-1) as Item[]
       const selectors = menu.filter(item => item.label === title)
       expect(selectors).toHaveLength(1)
-      expect(selectors[0]?.enabled).toBe(platform !== 'linux')
+      expect(selectors[0]?.enabled).toBe(true)
       expect(selectors[0]?.click).toBeUndefined()
       const submenu = selectors[0]?.submenu
       expect(submenu).toHaveLength(3)
@@ -1785,11 +1785,11 @@ describe('Electron desktop runtime', () => {
       for (const [index, target] of modes.entries()) {
         const item = submenu?.[index]
         expect(item).toEqual(expect.objectContaining({
-          type: 'radio', checked: target === mode, enabled: platform !== 'linux',
+          type: 'radio', checked: target === mode, enabled: true,
         }))
         requestModeChange.mockClear()
         item?.click?.()
-        if (target === mode || platform === 'linux') {
+        if (target === mode) {
           expect(requestModeChange).not.toHaveBeenCalled()
         } else {
           await vi.waitFor(() => { expect(requestModeChange).toHaveBeenCalledExactlyOnceWith(target) })

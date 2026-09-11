@@ -44,7 +44,7 @@ function baseWindowOptions(
  * @param spec - shell values resolved from the active Cordis row.
  * @param icon - validated application icon.
  * @param platform - current Electron platform.
- * @returns custom frame options on macOS/Windows and a native Linux fallback.
+ * @returns custom frame options on macOS/Windows/Linux and a native fallback elsewhere.
  */
 export function compatibilityWindowOptions(
   spec: DesktopShellSpec,
@@ -154,7 +154,23 @@ function customChromeWindowOptions(
       thickFrame: true,
     }
   }
-  throw new Error('dsh-plugin-desktop: custom desktop shell modes are supported on macOS and Windows')
+  if (platform === 'linux') {
+    // Linux follows the same Window Controls Overlay contract as Windows: the
+    // renderer owns the title bar while the compositor draws native controls.
+    // Window materials stay 'off' on Linux, so no backdrop is requested here.
+    return {
+      ...options,
+      autoHideMenuBar: true,
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#00000000',
+        symbolColor: '#7f858f',
+        height: geometry.titlebarHeight,
+      },
+      hasShadow: true,
+    }
+  }
+  throw new Error('dsh-plugin-desktop: custom desktop shell modes are unsupported on this platform')
 }
 
 /**

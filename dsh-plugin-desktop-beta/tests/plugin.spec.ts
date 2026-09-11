@@ -634,7 +634,7 @@ describe('desktop Host plugin', () => {
     expect(() => apply(harness.ctx, { ...config, networkExposure: 'lan' })).not.toThrow()
   })
 
-  it('validates the effective Linux mode while a browser migration is deferred', () => {
+  it('accepts every Linux shell mode while browser access still needs compatibility mode', () => {
     const harness = createHarness('linux')
     apply(harness.ctx, config)
     const register = vi.mocked(harness.ctx.settings.register)
@@ -649,12 +649,8 @@ describe('desktop Host plugin', () => {
       networkExposure: 'loopback',
       logLevel: 'info',
     }
-    expect(() => options?.validate?.({ ...settings, mode: 'advanced' })).toThrow(
-      'supported on macOS and Windows',
-    )
-    expect(() => options?.validate?.({ ...settings, mode: 'extended' })).toThrow(
-      'supported on macOS and Windows',
-    )
+    expect(() => options?.validate?.({ ...settings, mode: 'advanced' })).not.toThrow()
+    expect(() => options?.validate?.({ ...settings, mode: 'extended' })).not.toThrow()
     expect(() => options?.validate?.({ ...settings, mode: 'compatibility' })).not.toThrow()
     expect(() => options?.validate?.({
       ...settings,
@@ -665,7 +661,7 @@ describe('desktop Host plugin', () => {
       ...settings,
       mode: 'advanced',
       networkExposure: 'lan',
-    })).toThrow('supported on macOS and Windows')
+    })).not.toThrow()
   })
 
   it('accepts a deferred LAN preference independently of browser mode on supported platforms', () => {

@@ -29,12 +29,18 @@ body:is([data-dsh-desktop-mode="extended"], [data-dsh-desktop-mode="advanced"]) 
 .dshDesktopConversationSurface { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); }
 .dshDesktopRightbarSurface { position: relative; grid-column: 3; grid-row: 1; min-width: 0; min-height: 0; overflow: visible; }
 .dshDesktopFrame[data-rightbar-fullscreen], .dshDesktopFrame[data-rightbar-fullscreen] .dshDesktopResizeHandle { transition: none; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] { grid-template-rows: ${ADVANCED_WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopSidebarSurface { grid-row: 1 / -1; }
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"],
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] { grid-template-rows: ${ADVANCED_WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopSidebarSurface,
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] .dshDesktopSidebarSurface { grid-row: 1 / -1; }
 .dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopConversationSurface,
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopRightbarSurface { grid-row: 2; }
-.dshDesktopWindowsCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopRightbarSurface,
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] .dshDesktopConversationSurface,
+.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] .dshDesktopRightbarSurface { grid-row: 2; }
+.dshDesktopWindowsCaptionRow, .dshDesktopLinuxCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
 .dshDesktopWindowsCaptionRow::before { content: ""; position: absolute; inset: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH}px 0 0; user-select: none; -webkit-app-region: drag; }
+/* Linux controls can sit on either side, so honour the overlay-safe area Chromium publishes. */
+.dshDesktopLinuxCaptionRow::before { content: ""; position: absolute; top: 0; right: calc(100% - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100%)); bottom: 0; left: env(titlebar-area-x, 0px); user-select: none; -webkit-app-region: drag; }
 .dshDesktopFrame[data-dragging] { transition: none; }
 .dshDesktopOverlay { position: absolute; z-index: 1000; inset: 0; pointer-events: none; }
 .dshDesktopOverlay > * { pointer-events: auto; }
@@ -42,7 +48,8 @@ body:is([data-dsh-desktop-mode="extended"], [data-dsh-desktop-mode="advanced"]) 
 .dshDesktopFrame[data-dragging] .dshDesktopResizeHandle { transition: none; }
 .dshDesktopNoDrag, button, input, textarea, select, label, summary, a, [contenteditable="true"], [role="button"], [role="checkbox"], [role="dialog"], [role="menuitem"], [role="option"], [role="switch"], [role="tab"] { -webkit-app-region: no-drag !important; }
 [role="dialog"], [aria-modal="true"] { -webkit-app-region: no-drag !important; }
-html:has([aria-modal="true"]) .dshDesktopWindowsCaptionRow::before { -webkit-app-region: no-drag !important; }
+html:has([aria-modal="true"]) .dshDesktopWindowsCaptionRow::before,
+html:has([aria-modal="true"]) .dshDesktopLinuxCaptionRow::before { -webkit-app-region: no-drag !important; }
 @media (prefers-reduced-motion: reduce) {
   .dshDesktopFrame,
   .dshDesktopResizeHandle { transition: none !important; }

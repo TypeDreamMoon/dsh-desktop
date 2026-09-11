@@ -254,9 +254,6 @@ export function apply(ctx: Context, config: Config): void {
         if (!desktopBrowserAccessAvailable(value.mode) && value.openBrowser) {
           throw new Error('dsh-plugin-desktop: browser access requires compatibility mode')
         }
-        if (value.mode !== 'compatibility' && runtime.platform === 'linux') {
-          throw new Error('dsh-plugin-desktop: custom desktop shell modes are supported on macOS and Windows')
-        }
       },
     },
   )

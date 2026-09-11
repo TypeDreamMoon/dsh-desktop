@@ -121,7 +121,7 @@ export function decodeDesktopSetupWizardInput(search: string): DesktopSetupWizar
 }
 
 function normalizedSelection(input: DesktopSetupWizardInput): DesktopSetupWizardSelection {
-  const mode = input.platform === 'linux' ? 'compatibility' : input.mode
+  const mode = input.mode
   const browserAccess = mode === 'compatibility' && (input.openBrowser || input.networkExposure === 'lan')
   return {
     mode,
@@ -239,19 +239,17 @@ function Page({
 
 function ModeOptions({
   copy,
-  input,
   selection,
   update,
 }: {
   readonly copy: DesktopSetupWizardCopy
-  readonly input: DesktopSetupWizardInput
   readonly selection: DesktopSetupWizardSelection
   readonly update: (selection: DesktopSetupWizardSelection) => void
 }): JSX.Element {
   const modes: readonly { readonly value: DesktopSetupWizardMode; readonly title: string; readonly body: string }[] = [
     { value: 'compatibility', title: copy.compatibilityMode, body: copy.compatibilityModeBody },
-    { value: 'extended', title: copy.extendedMode, body: input.platform === 'linux' ? copy.unavailableOnLinux : copy.extendedModeBody },
-    { value: 'advanced', title: copy.advancedMode, body: input.platform === 'linux' ? copy.unavailableOnLinux : copy.advancedModeBody },
+    { value: 'extended', title: copy.extendedMode, body: copy.extendedModeBody },
+    { value: 'advanced', title: copy.advancedMode, body: copy.advancedModeBody },
   ]
   return <RadioGroup
     aria-label={copy.presentationTitle}
@@ -270,7 +268,6 @@ function ModeOptions({
     value={selection.mode}
   >{modes.map(option => <Choice
     body={option.body}
-    disabled={input.platform === 'linux' && option.value !== 'compatibility'}
     id={`setup-window-mode-${option.value}`}
     key={option.value}
     selected={selection.mode === option.value}
@@ -448,7 +445,7 @@ export function SetupWizardStepPage({
   readonly requestBrowserAccess: (enabled: boolean) => void
   readonly requestExposure: (exposure: DesktopSetupWizardNetworkExposure) => void
 }): JSX.Element {
-  if (step === 'mode') return <Page step={step} subtitle={copy.presentationBody} title={copy.presentationTitle}><ModeOptions copy={copy} input={input} selection={selection} update={update} /></Page>
+  if (step === 'mode') return <Page step={step} subtitle={copy.presentationBody} title={copy.presentationTitle}><ModeOptions copy={copy} selection={selection} update={update} /></Page>
   if (step === 'material') return <Page step={step} subtitle={copy.windowMaterialBody} title={copy.windowMaterial}><MaterialOptions copy={copy} input={input} selection={selection} update={update} /></Page>
   if (step === 'aa') return <Page step={step} subtitle={copy.aaIntro} title={copy.aaTitle}>
     <RadioGroup aria-label={copy.aaTitle} name="setup-aa" value={String(selection.aaEnabled === true)}

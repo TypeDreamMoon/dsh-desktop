@@ -203,12 +203,32 @@ describe('compatibility BrowserWindow options', () => {
     expect(DESKTOP_FRAME_HEIGHT).toBe(36)
   })
 
-  it('rejects enhanced mode on Linux', () => {
-    expect(() => advancedWindowOptions(
-      { ...spec, mode: 'advanced' },
+  it('uses native Window Controls Overlay for enhanced and extended mode on Linux', () => {
+    const advanced = advancedWindowOptions(
+      { ...spec, mode: 'advanced', material: 'off' },
       {} as NativeImage,
       'linux',
       preload,
-    )).toThrow('supported on macOS and Windows')
+    )
+    expect(advanced.titleBarStyle).toBe('hidden')
+    expect(advanced.titleBarOverlay).toEqual({
+      color: '#00000000',
+      symbolColor: '#7f858f',
+      height: ADVANCED_WINDOWS_TITLEBAR_HEIGHT,
+    })
+    expect(advanced.backgroundMaterial).toBeUndefined()
+
+    const extended = extendedWindowOptions(
+      { ...spec, mode: 'extended', material: 'off' },
+      {} as NativeImage,
+      'linux',
+      preload,
+    )
+    expect(extended.titleBarStyle).toBe('hidden')
+    expect(extended.titleBarOverlay).toEqual({
+      color: '#00000000',
+      symbolColor: '#7f858f',
+      height: DESKTOP_FRAME_HEIGHT,
+    })
   })
 })

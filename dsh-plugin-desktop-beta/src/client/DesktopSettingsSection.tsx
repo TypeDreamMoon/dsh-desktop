@@ -668,17 +668,17 @@ export function DesktopSettingsSection({
           />
           <Choice
             title={t('extendedMode')}
-            body={platform === 'linux' ? t('extendedUnavailableLinux') : t('extendedModeBody')}
+            body={t('extendedModeBody')}
             selected={mode === 'extended'}
-            disabled={platform === 'linux' || !settingsWritable || busy !== undefined || restart !== 'none'}
+            disabled={!settingsWritable || busy !== undefined || restart !== 'none'}
             action={() => { setMode('extended') }}
             status={mode === 'extended' ? t('selected') : undefined}
           />
           <Choice
             title={t('advancedMode')}
-            body={platform === 'linux' ? t('advancedUnavailableLinux') : t('advancedModeBody')}
+            body={t('advancedModeBody')}
             selected={mode === 'advanced'}
-            disabled={platform === 'linux' || !settingsWritable || busy !== undefined || restart !== 'none'}
+            disabled={!settingsWritable || busy !== undefined || restart !== 'none'}
             action={() => { setMode('advanced') }}
             status={mode === 'advanced' ? t('selected') : undefined}
           />

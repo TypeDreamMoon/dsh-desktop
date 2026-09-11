@@ -124,6 +124,10 @@ body[data-dsh-desktop-mode="extended"]:not([data-dsh-desktop-material="off"]) {
 .dshDesktopFrameTitlebar[data-platform="win32"] {
   padding: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH + 8}px 0 8px;
 }
+/* Linux window controls may be on either edge; reserve whatever Chromium reports. */
+.dshDesktopFrameTitlebar[data-platform="linux"] {
+  padding: 0 calc(100% - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100%) + 8px) 0 calc(env(titlebar-area-x, 0px) + 8px);
+}
 .dshDesktopFrameIdentity {
   position: absolute;
   left: 50%;

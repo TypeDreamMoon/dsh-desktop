@@ -127,6 +127,7 @@ export function DesktopOwnedFrame({
       </aside>
       {/* Electron resolves app regions in DOM order; Desktop overlays must remain later. */}
       {mode === 'advanced' && platform === 'win32' && <div className="dshDesktopWindowsCaptionRow" aria-hidden="true" />}
+      {mode === 'advanced' && platform === 'linux' && <div className="dshDesktopLinuxCaptionRow" aria-hidden="true" />}
       <div className="dshDesktopOverlay" data-shell-overlay>
         {renderSlot('shell.overlay', {})}
       </div>
