@@ -780,7 +780,14 @@ describe('published package surface', () => {
       'build/tray-icon-blue@2x.png',
     ]
     expect(manifest.build?.win?.asarUnpack).toEqual([...windowsAndLinuxIcons, 'node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**'])
-    expect(manifest.build?.linux?.asarUnpack).toEqual([...windowsAndLinuxIcons, 'node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**'])
+    // Sharp keeps libvips in a sibling package on Linux and ships it as
+    // `libvips-cpp.so.<version>`, which smart unpack cannot recognise as a native
+    // library. Without this the packaged Host fails to boot on Linux.
+    expect(manifest.build?.linux?.asarUnpack).toEqual([
+      ...windowsAndLinuxIcons,
+      'node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**',
+      'node_modules/@img/sharp-libvips-linux-*/lib/libvips-cpp.so.*',
+    ])
     expect(manifest.build?.electronFuses).toEqual({
       enableEmbeddedAsarIntegrityValidation: true,
       onlyLoadAppFromAsar: true,

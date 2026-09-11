@@ -430,7 +430,8 @@
         "build/tray-icon-blue@1.25x.png",
         "build/tray-icon-blue@1.5x.png",
         "build/tray-icon-blue@2x.png",
-        "node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**"
+        "node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**",
+        "node_modules/@img/sharp-libvips-linux-*/lib/libvips-cpp.so.*"
       ],
       "target": [
         "dir"
