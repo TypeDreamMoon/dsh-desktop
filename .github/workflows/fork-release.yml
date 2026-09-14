@@ -11,6 +11,12 @@ name: Fork release
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Edition to build
+        type: choice
+        options: [both, stable, beta]
+        default: both
   push:
     tags:
       - 'v*'
@@ -26,14 +32,43 @@ env:
   DSH_TELEMETRY_DISABLED: '1'
 
 jobs:
-  windows:
+  # A tag builds only the edition it names; a manual run builds the requested
+  # edition(s). This keeps a stable tag's release free of beta installers.
+  target:
     if: github.repository == 'TypeDreamMoon/dsh-desktop'
+    runs-on: ubuntu-latest
+    outputs:
+      editions: ${{ steps.resolve.outputs.editions }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_CHANNEL: ${{ github.event.inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            channel="$INPUT_CHANNEL"
+          elif [[ "$REF_NAME" == *"-beta."* ]]; then
+            channel="beta"
+          else
+            channel="stable"
+          fi
+          case "$channel" in
+            stable) echo 'editions=["dsh-plugin-desktop"]' >> "$GITHUB_OUTPUT" ;;
+            beta) echo 'editions=["dsh-plugin-desktop-beta"]' >> "$GITHUB_OUTPUT" ;;
+            *) echo 'editions=["dsh-plugin-desktop","dsh-plugin-desktop-beta"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  windows:
+    needs: target
     runs-on: windows-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta]
+        workspace: ${{ fromJSON(needs.target.outputs.editions) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -72,13 +107,13 @@ jobs:
             ${{ matrix.workspace }}/dist/*-Portable.zip
 
   macos:
-    if: github.repository == 'TypeDreamMoon/dsh-desktop'
+    needs: target
     runs-on: macos-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        workspace: [dsh-plugin-desktop, dsh-plugin-desktop-beta]
+        workspace: ${{ fromJSON(needs.target.outputs.editions) }}
     steps:
       - uses: actions/checkout@v6
         with:
