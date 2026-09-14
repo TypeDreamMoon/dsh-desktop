@@ -5,6 +5,7 @@ import {
   DESKTOP_INSTALLATION_ID_HEADER,
   type DesktopInstallationId,
 } from './desktop-installation-id.ts'
+import { OFFICIAL_UPDATE_SOURCE, type DesktopUpdateSource } from './update-source.ts'
 
 /** Public endpoint returning the latest DSH Desktop version for a requested channel. */
 export const DESKTOP_VERSION_ENDPOINT = 'https://www.dshdesktop.cn/api/desktop/version'
@@ -20,6 +21,50 @@ export type DesktopReleaseChannel = 'stable' | 'beta'
 
 /** Maximum response body bytes accepted from the version service. */
 export const MAX_VERSION_RESPONSE_BYTES = 4 * 1024
+
+/** GitHub REST base used to list one repository's releases. */
+export const GITHUB_RELEASES_BASE = 'https://api.github.com/repos'
+
+/** GitHub API media type pinned by the release listing. */
+export const GITHUB_API_ACCEPT = 'application/vnd.github+json'
+
+/** GitHub REST API version pinned by the release listing. */
+export const GITHUB_API_VERSION = '2022-11-28'
+
+/** Maximum release-listing body bytes accepted from GitHub. */
+export const MAX_GITHUB_RELEASES_RESPONSE_BYTES = 1024 * 1024
+
+/** One downloadable release asset exposed by GitHub. */
+export interface GithubReleaseAsset {
+  /** Asset file name. */
+  readonly name: string
+  /** HTTPS URL that redirects to the asset bytes. */
+  readonly url: string
+}
+
+/** One non-draft GitHub release with a supported Desktop version tag. */
+export interface GithubDesktopRelease {
+  /** Canonical version parsed from the release tag. */
+  readonly version: string
+  /** Release stream derived from the tag's prerelease identifiers. */
+  readonly channel: DesktopReleaseChannel
+  /** Assets attached to the release, in API order. */
+  readonly assets: readonly GithubReleaseAsset[]
+}
+
+/** Inputs for resolving one GitHub-hosted Desktop release. */
+export interface GithubReleaseQuery {
+  /** `owner/repository` to list releases from. */
+  readonly repository: string
+  /** Release stream to select. */
+  readonly channel: DesktopReleaseChannel
+  /** Fetch-compatible request function. */
+  readonly request: UpdateRequest
+  /** Exact version to select; omitted selects the newest matching release. */
+  readonly version?: string
+  /** Caller-owned cancellation signal. */
+  readonly signal?: AbortSignal
+}
 
 /** Strictly parsed SemVer components. Numeric components remain strings to avoid overflow. */
 export interface ParsedSemVer {
@@ -56,6 +101,8 @@ export interface UpdateCheckOptions {
   readonly request?: UpdateRequest
   /** Installation UUID attached only to the fixed version-check endpoint. */
   readonly installationId?: DesktopInstallationId
+  /** Release source; omitted keeps the official DSH Desktop service. */
+  readonly source?: DesktopUpdateSource
 }
 
 /** Successful comparison returned by the stable version service. */
@@ -120,6 +167,18 @@ export async function checkForDesktopUpdate(
     options.currentChannel ?? options.channel,
   )
   if (current === null) return null
+
+  const source = options.source ?? OFFICIAL_UPDATE_SOURCE
+  if (source.kind === 'github') {
+    return await checkGithubDesktopUpdate({
+      source,
+      current,
+      channel: options.channel,
+      allowDowngrade: options.allowDowngrade === true,
+      request: options.request ?? defaultRequest,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+  }
 
   let headers: HeadersInit
   try {
@@ -196,15 +255,162 @@ export function desktopVersionRequestHeaders(
   return headers
 }
 
+/** GitHub Releases API listing endpoint for one `owner/repo`. */
+export function githubReleasesEndpoint(repository: string): string {
+  return `${GITHUB_RELEASES_BASE}/${repository}/releases?per_page=100`
+}
+
+/** GitHub request headers carrying no user identity and no installation UUID. */
+export function githubReleaseRequestHeaders(): Readonly<Record<string, string>> {
+  return {
+    Accept: GITHUB_API_ACCEPT,
+    'X-GitHub-Api-Version': GITHUB_API_VERSION,
+    'User-Agent': 'dsh-desktop-updater',
+  }
+}
+
+/**
+ * Resolve one GitHub-hosted Desktop release: exactly `version` when given, the
+ * newest release of `channel` otherwise. Drafts and unsupported tags are
+ * ignored; a network, status, or parse failure returns null.
+ * @param query - repository, channel, optional exact version, and request adapter.
+ * @returns the release with its assets, or null when none matches.
+ */
+export async function resolveGithubDesktopRelease(
+  query: GithubReleaseQuery,
+): Promise<GithubDesktopRelease | null> {
+  const releases = await listGithubDesktopReleases(query.repository, query.request, query.signal)
+  if (releases === null) return null
+  const matching = releases.filter(release => release.channel === query.channel
+    && (query.version === undefined || release.version === query.version))
+  if (matching.length === 0) return null
+  if (query.version !== undefined) return matching[0] ?? null
+  return matching.reduce((best, release) =>
+    (compareSemVerVersions(release.version, best.version) ?? 0) > 0 ? release : best)
+}
+
+async function listGithubDesktopReleases(
+  repository: string,
+  request: UpdateRequest,
+  signal: AbortSignal | undefined,
+): Promise<GithubDesktopRelease[] | null> {
+  let response: Response
+  try {
+    response = await request(githubReleasesEndpoint(repository), {
+      method: 'GET',
+      headers: githubReleaseRequestHeaders(),
+      cache: 'no-store',
+      redirect: 'error',
+      ...(signal === undefined ? {} : { signal }),
+    })
+  } catch {
+    return null
+  }
+  if (response.status !== 200) return null
+
+  let body: string
+  try {
+    body = await readLimitedBody(response, MAX_GITHUB_RELEASES_RESPONSE_BYTES)
+  } catch {
+    return null
+  }
+  try {
+    return parseGithubReleases(body)
+  } catch {
+    return null
+  }
+}
+
+async function checkGithubDesktopUpdate(options: {
+  readonly source: { readonly kind: 'github', readonly repository: string }
+  readonly current: ParsedSemVer
+  readonly channel: DesktopReleaseChannel
+  readonly allowDowngrade: boolean
+  readonly request: UpdateRequest
+  readonly signal?: AbortSignal
+}): Promise<UpdateCheckResult | null> {
+  const release = await resolveGithubDesktopRelease({
+    repository: options.source.repository,
+    channel: options.channel,
+    request: options.request,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  })
+  if (release === null) return null
+  const latest = parseCanonicalChannelVersion(release.version, options.channel)
+  if (latest === null) return null
+  const comparison = compareParsedSemVer(latest, options.current)
+  return {
+    status: comparison > 0 || (options.allowDowngrade && comparison !== 0)
+      ? 'update-available'
+      : 'up-to-date',
+    currentVersion: options.current.version,
+    latestVersion: latest.version,
+  }
+}
+
+function parseGithubReleases(body: string): GithubDesktopRelease[] {
+  const value: unknown = JSON.parse(body)
+  if (!Array.isArray(value)) return []
+  const releases: GithubDesktopRelease[] = []
+  for (const entry of value) {
+    if (!isRecord(entry) || entry.draft === true) continue
+    const tag = entry.tag_name
+    if (typeof tag !== 'string') continue
+    const version = normalizeGithubTag(tag)
+    if (version === null) continue
+    const channel = channelOfVersion(version)
+    if (channel === null) continue
+    releases.push({ version, channel, assets: parseGithubAssets(entry.assets) })
+  }
+  return releases
+}
+
+function normalizeGithubTag(tag: string): string | null {
+  const version = tag.startsWith('v') ? tag.slice(1) : tag
+  const parsed = parseSemVer(version)
+  return parsed !== null && parsed.version === version ? version : null
+}
+
+function channelOfVersion(version: string): DesktopReleaseChannel | null {
+  if (parseCanonicalChannelVersion(version, 'stable') !== null) return 'stable'
+  if (parseCanonicalChannelVersion(version, 'beta') !== null) return 'beta'
+  return null
+}
+
+function parseGithubAssets(value: unknown): GithubReleaseAsset[] {
+  if (!Array.isArray(value)) return []
+  const assets: GithubReleaseAsset[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    const name = entry.name
+    const url = entry.browser_download_url
+    if (typeof name !== 'string' || name.length === 0 || name.length > 256) continue
+    if (typeof url !== 'string' || !isHttpsUrl(url)) continue
+    assets.push({ name, url })
+  }
+  return assets
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 async function defaultRequest(url: string, init: RequestInit): Promise<Response> {
   return globalThis.fetch(url, init)
 }
 
-async function readLimitedBody(response: Response): Promise<string> {
+async function readLimitedBody(
+  response: Response,
+  maxBytes: number = MAX_VERSION_RESPONSE_BYTES,
+): Promise<string> {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null
     && /^[0-9]+$/u.test(declaredLength)
-    && BigInt(declaredLength) > BigInt(MAX_VERSION_RESPONSE_BYTES)) {
+    && BigInt(declaredLength) > BigInt(maxBytes)) {
     throw new Error('version response is too large')
   }
 
@@ -218,7 +424,7 @@ async function readLimitedBody(response: Response): Promise<string> {
       const chunk = await reader.read()
       if (chunk.done) break
       bytesRead += chunk.value.byteLength
-      if (bytesRead > MAX_VERSION_RESPONSE_BYTES) {
+      if (bytesRead > maxBytes) {
         await reader.cancel().catch(() => undefined)
         throw new Error('version response is too large')
       }

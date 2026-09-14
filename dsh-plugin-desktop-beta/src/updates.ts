@@ -8,6 +8,7 @@ import { DESKTOP_UPDATE_CHECK_PATH } from './desktop-settings-contract.ts'
 import { handleDesktopUpdateCheckRequest } from './desktop-settings-route.ts'
 import type {} from './runtime.ts'
 import { startDesktopUpdateLifecycle } from './update-lifecycle.ts'
+import { parseDesktopUpdateSource } from './update-source.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-updates'
@@ -27,6 +28,11 @@ export interface Config {
   intervalMs: number
   /** Maximum duration of one version request before caller-owned cancellation. */
   requestTimeoutMs: number
+  /**
+   * Where versions and installers come from: `official` (default) uses the DSH
+   * Desktop service, `github:<owner>/<repo>` uses that repository's Releases.
+   */
+  releaseSource: string
 }
 
 /** Validated scheduled update policy. */
@@ -35,6 +41,7 @@ export const Config: z<Config> = z.object({
   initialDelayMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(60_000),
   intervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(6 * 60 * 60 * 1000),
   requestTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
+  releaseSource: z.string().default('official'),
 })
 
 /**
@@ -46,7 +53,13 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     const lifecycle = startDesktopUpdateLifecycle({
       adapter: ctx.desktopRuntime.updates,
-      policy: config,
+      policy: {
+        enabled: config.enabled,
+        initialDelayMs: config.initialDelayMs,
+        intervalMs: config.intervalMs,
+        requestTimeoutMs: config.requestTimeoutMs,
+        source: parseDesktopUpdateSource(config.releaseSource),
+      },
       locale: () => ctx.desktopRuntime.locale,
       registerTrayItem: item => ctx.desktopRuntime.registerTrayItem(item),
     })

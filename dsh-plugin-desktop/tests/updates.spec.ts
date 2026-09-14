@@ -18,6 +18,7 @@ import {
   DESKTOP_RELEASE_CHANNEL_HEADER,
   type UpdateCheckResult,
 } from '../src/update-checker.ts'
+import { OFFICIAL_UPDATE_SOURCE } from '../src/update-source.ts'
 import { apply, Config, inject, type Config as UpdateConfig } from '../src/updates.ts'
 
 const testConfig: UpdateConfig = {
@@ -25,6 +26,7 @@ const testConfig: UpdateConfig = {
   initialDelayMs: 10,
   intervalMs: 1000,
   requestTimeoutMs: 1000,
+  releaseSource: 'official',
 }
 
 function versionResponse(version: unknown): Response {
@@ -169,6 +171,7 @@ describe('desktop update Host plugin', () => {
       '2.0.4',
       expect.any(AbortSignal),
       'stable',
+      OFFICIAL_UPDATE_SOURCE,
     )
     const channels = request.mock.calls.map(([, init]) => new Headers(init.headers).get(DESKTOP_RELEASE_CHANNEL_HEADER))
     expect(channels).toContain('beta')
@@ -183,6 +186,7 @@ describe('desktop update Host plugin', () => {
       initialDelayMs: 60_000,
       intervalMs: 21_600_000,
       requestTimeoutMs: 15_000,
+      releaseSource: 'official',
     })
     expect(() => Config({ intervalMs: 0 } as UpdateConfig)).toThrow()
     expect(() => Config({ requestTimeoutMs: 0 } as UpdateConfig)).toThrow()
@@ -610,5 +614,36 @@ describe('desktop update Host plugin', () => {
     expect(harness.notifications).toEqual([])
     expect(harness.warnings).toEqual([])
     expect(harness.tray.label()).toBe('Check for Updates…')
+  })
+  it('routes a GitHub release source through the version check and download adapter', async () => {
+    const request = vi.fn(async () => Response.json([{
+      tag_name: 'v2.1.0',
+      draft: false,
+      prerelease: false,
+      assets: [{
+        name: 'DSH-Desktop-2.1.0-x64-Setup.exe',
+        browser_download_url: 'https://github.com/example/fork/releases/download/v2.1.0/DSH-Desktop-2.1.0-x64-Setup.exe',
+      }],
+    }]))
+    const harness = await createHarness({
+      currentVersion: '2.0.0',
+      request,
+      confirmDownload: async () => true,
+      config: { ...testConfig, releaseSource: 'github:example/fork' },
+    })
+
+    await harness.tray.invoke()
+
+    expect(request).toHaveBeenCalledWith(
+      'https://api.github.com/repos/example/fork/releases?per_page=100',
+      expect.objectContaining({ method: 'GET' }),
+    )
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith(
+      '2.1.0',
+      expect.any(AbortSignal),
+      undefined,
+      { kind: 'github', repository: 'example/fork' },
+    )
+    await harness.dispose()
   })
 })

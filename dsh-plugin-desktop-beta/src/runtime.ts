@@ -3,6 +3,7 @@ import type { DesktopRendererAccessHeader } from './desktop-browser-access.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
 import type { DesktopReleaseChannel, UpdateCheckResult, UpdateRequest } from './update-checker.ts'
 import type { DesktopInstallationId } from './desktop-installation-id.ts'
+import type { DesktopUpdateSource } from './update-source.ts'
 import type { ProfileCreateWindowOptions } from './profile-create-window.ts'
 import type {
   DesktopWindowMaterial,
@@ -118,8 +119,13 @@ export interface DesktopUpdateAdapter {
   confirmDownload(version: string, channel?: DesktopReleaseChannel): Promise<boolean>
   /** Present the outcome of a user-triggered version check. */
   showManualCheckResult(result: UpdateCheckResult | null): Promise<void>
-  /** Download and hand one confirmed update to the platform installer. */
-  downloadAndOpen(version: string, signal: AbortSignal, channel?: DesktopReleaseChannel): Promise<void>
+  /** Download and hand one confirmed update to the platform installer from the selected source. */
+  downloadAndOpen(
+    version: string,
+    signal: AbortSignal,
+    channel?: DesktopReleaseChannel,
+    source?: DesktopUpdateSource,
+  ): Promise<void>
   /** Present a native status notification without blocking the Host tree. */
   notify(notification: DesktopNotification): void
 }

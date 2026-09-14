@@ -8,8 +8,11 @@ import {
   compareSemVerVersions,
   DESKTOP_RELEASE_CHANNEL_HEADER,
   parseSemVer,
+  resolveGithubDesktopRelease,
   type DesktopReleaseChannel,
+  type GithubReleaseAsset,
 } from './update-checker.ts'
+import { OFFICIAL_UPDATE_SOURCE, type DesktopUpdateSource } from './update-source.ts'
 
 /** Desktop platforms with a fixed installer download endpoint. */
 export type DesktopDownloadPlatform = 'darwin' | 'win32'
@@ -29,6 +32,7 @@ export const MAX_UPDATE_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 /** Failure categories exposed to the update coordinator. */
 export type UpdateDownloadErrorCode =
   | 'aborted'
+  | 'asset-unavailable'
   | 'empty-body'
   | 'http-status'
   | 'invalid-artifact'
@@ -47,6 +51,8 @@ export interface DownloadDesktopUpdateOptions {
   readonly version: string
   /** Release stream selected by the running Desktop flavor. */
   readonly channel?: DesktopReleaseChannel
+  /** Release source; omitted keeps the official DSH Desktop service. */
+  readonly source?: DesktopUpdateSource
   /** Absolute installer path selected by the user. */
   readonly destinationPath: string
   /** Request implementation, normally backed by Electron `net.fetch`. */
@@ -119,14 +125,39 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   const paths = await prepareDownloadPaths(destinationPath)
   throwIfAborted(options.signal)
 
+  const source = options.source ?? OFFICIAL_UPDATE_SOURCE
+  let requestUrl: string
+  let requestHeaders: Readonly<Record<string, string>>
+  if (source.kind === 'github') {
+    const asset = await resolveGithubUpdateAsset({
+      source,
+      platform,
+      version: options.version,
+      channel,
+      request: options.request,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+    if (asset === null) {
+      throw new UpdateDownloadError(
+        'asset-unavailable',
+        'The selected GitHub release has no installer for this platform.',
+      )
+    }
+    requestUrl = asset.url
+    requestHeaders = { Accept: 'application/octet-stream' }
+  } else {
+    requestUrl = DESKTOP_DOWNLOAD_URLS[platform]
+    requestHeaders = {
+      [DESKTOP_RELEASE_CHANNEL_HEADER]: channel,
+      [DESKTOP_TARGET_VERSION_HEADER]: options.version,
+    }
+  }
+
   let response: Response
   try {
-    response = await options.request(DESKTOP_DOWNLOAD_URLS[platform], {
+    response = await options.request(requestUrl, {
       method: 'GET',
-      headers: {
-        [DESKTOP_RELEASE_CHANNEL_HEADER]: channel,
-        [DESKTOP_TARGET_VERSION_HEADER]: options.version,
-      },
+      headers: requestHeaders,
       cache: 'no-store',
       redirect: 'follow',
       ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -168,6 +199,52 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
       throw new AggregateError([failure, cleanupCause], 'Failed to download and clean up the update installer.')
     }
   }
+}
+
+/** Resolve the installer asset for one exact GitHub-hosted release. */
+async function resolveGithubUpdateAsset(options: {
+  readonly source: { readonly kind: 'github', readonly repository: string }
+  readonly platform: DesktopDownloadPlatform
+  readonly version: string
+  readonly channel: DesktopReleaseChannel
+  readonly request: UpdateArtifactRequest
+  readonly signal?: AbortSignal
+}): Promise<GithubReleaseAsset | null> {
+  const release = await resolveGithubDesktopRelease({
+    repository: options.source.repository,
+    channel: options.channel,
+    version: options.version,
+    request: options.request,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  })
+  if (release === null) return null
+  return selectGithubUpdateAsset(release.assets, options.platform, options.version)
+}
+
+/**
+ * Pick the installable asset for one platform and version: the NSIS
+ * `-Setup.exe` on Windows (never the portable archive) and the `.dmg` on
+ * macOS. The version must appear in the name so a release carrying both
+ * editions resolves only the requested one.
+ * @param assets - Assets attached to the resolved release.
+ * @param platform - Host platform to select for.
+ * @param version - Canonical version the asset must name.
+ * @returns the matching asset, or null when the release has none.
+ */
+export function selectGithubUpdateAsset(
+  assets: readonly GithubReleaseAsset[],
+  platform: DesktopDownloadPlatform,
+  version: string,
+): GithubReleaseAsset | null {
+  const matches = assets.filter((asset) => {
+    if (!asset.name.includes(version)) return false
+    const name = asset.name.toLowerCase()
+    if (platform === 'win32') {
+      return name.endsWith('.exe') && !name.includes('portable') && /setup\.exe$/u.test(name)
+    }
+    return name.endsWith('.dmg')
+  })
+  return matches[0] ?? null
 }
 
 /** Fixed default filename shown by the native destination picker. */

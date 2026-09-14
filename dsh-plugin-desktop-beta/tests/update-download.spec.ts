@@ -12,10 +12,11 @@ import {
   pendingDesktopUpdateArtifact,
   recordDesktopUpdateArtifact,
   resolveDesktopUpdateArtifact,
+  selectGithubUpdateAsset,
   type DesktopDownloadPlatform,
   type UpdateArtifactRequest,
 } from '../src/update-download.ts'
-import { DESKTOP_RELEASE_CHANNEL_HEADER } from '../src/update-checker.ts'
+import { DESKTOP_RELEASE_CHANNEL_HEADER, githubReleasesEndpoint } from '../src/update-checker.ts'
 
 const temporaryRoots: string[] = []
 
@@ -390,5 +391,75 @@ describe('desktop update artifact cleanup', () => {
     await expect(pendingDesktopUpdateArtifact(userDataPath, '2.1.0', 'darwin')).resolves.toBeUndefined()
     if (remove) await expect(access(artifact.path)).rejects.toMatchObject({ code: 'ENOENT' })
     else await expect(access(artifact.path)).resolves.toBeUndefined()
+  })
+})
+
+describe('GitHub release installer source', () => {
+  function githubRelease(version: string, assets: unknown): Record<string, unknown> {
+    return {
+      tag_name: `v${version}`,
+      draft: false,
+      prerelease: version.includes('-'),
+      assets,
+    }
+  }
+
+  it('resolves the release API then downloads the matching installer asset', async () => {
+    const directory = await temporaryDirectory()
+    const artifact = windowsArtifact()
+    const calls: string[] = []
+    const assetUrl = 'https://github.com/example/fork/releases/download/v2.1.0/DSH-Desktop-2.1.0-x64-Setup.exe'
+    const request: UpdateArtifactRequest = async (url) => {
+      calls.push(url)
+      if (url === githubReleasesEndpoint('example/fork')) {
+        return Response.json([githubRelease('2.1.0', [{
+          name: 'DSH-Desktop-2.1.0-x64-Setup.exe',
+          browser_download_url: assetUrl,
+        }])])
+      }
+      return chunkedResponse([artifact])
+    }
+
+    const result = await downloadDesktopUpdate({
+      platform: 'win32',
+      version: '2.1.0',
+      source: { kind: 'github', repository: 'example/fork' },
+      destinationPath: destinationPath(directory, 'win32', '2.1.0'),
+      request,
+    })
+
+    expect(result).toBe(join(directory, 'DSH-Desktop-2.1.0-windows.exe'))
+    expect(await readFile(result)).toEqual(Buffer.from(artifact))
+    expect(calls).toEqual([githubReleasesEndpoint('example/fork'), assetUrl])
+    await expectNoPartialFiles(directory)
+  })
+
+  it('fails with asset-unavailable when the GitHub release has no platform installer', async () => {
+    const directory = await temporaryDirectory()
+    await expectFailure(downloadDesktopUpdate({
+      platform: 'darwin',
+      version: '2.1.0',
+      source: { kind: 'github', repository: 'example/fork' },
+      destinationPath: destinationPath(directory, 'darwin', '2.1.0'),
+      request: async () => Response.json([githubRelease('2.1.0', [{
+        name: 'DSH-Desktop-2.1.0-x64-Setup.exe',
+        browser_download_url: 'https://github.com/example/fork/releases/download/v2.1.0/setup.exe',
+      }])]),
+    }), 'asset-unavailable')
+    expect(await readdir(directory)).toEqual([])
+  })
+
+  it('prefers the versioned NSIS Setup executable and macOS disk image', () => {
+    expect(selectGithubUpdateAsset([
+      { name: 'DSH-Desktop-2.1.0-x64-Portable.exe', url: 'https://github.com/example/fork/releases/download/v2.1.0/portable.exe' },
+      { name: 'DSH-Desktop-Beta-2.0.9-beta.1-x64-Setup.exe', url: 'https://github.com/example/fork/releases/download/v2.1.0/beta.exe' },
+      { name: 'DSH-Desktop-2.1.0-x64-Setup.exe', url: 'https://github.com/example/fork/releases/download/v2.1.0/setup.exe' },
+    ], 'win32', '2.1.0')?.name).toBe('DSH-Desktop-2.1.0-x64-Setup.exe')
+    expect(selectGithubUpdateAsset([
+      { name: 'DSH-Desktop-Beta-2.1.0-beta.1-universal.dmg', url: 'https://github.com/example/fork/releases/download/v2.1.0-beta.1/app.dmg' },
+    ], 'darwin', '2.1.0-beta.1')?.name).toBe('DSH-Desktop-Beta-2.1.0-beta.1-universal.dmg')
+    expect(selectGithubUpdateAsset([
+      { name: 'latest.yml', url: 'https://github.com/example/fork/releases/download/v2.1.0/latest.yml' },
+    ], 'win32', '2.1.0')).toBeNull()
   })
 })

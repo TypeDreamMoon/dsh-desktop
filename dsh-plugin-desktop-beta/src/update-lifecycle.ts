@@ -16,6 +16,7 @@ import {
   type DesktopReleaseChannel,
   type UpdateCheckResult,
 } from './update-checker.ts'
+import type { DesktopUpdateSource } from './update-source.ts'
 
 const MAX_STATE_BYTES = 4 * 1024
 
@@ -25,6 +26,8 @@ export interface DesktopUpdatePolicy {
   readonly initialDelayMs: number
   readonly intervalMs: number
   readonly requestTimeoutMs: number
+  /** Release source used by version checks and installer downloads. */
+  readonly source: DesktopUpdateSource
 }
 
 /** Native capabilities supplied when one Host generation mounts update handling. */
@@ -193,6 +196,7 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
           channel,
           currentChannel: this.options.adapter.releaseChannel ?? 'stable',
           allowDowngrade,
+          source: this.options.policy.source,
           ...(this.options.adapter.installationId === undefined
             ? {}
             : { installationId: this.options.adapter.installationId }),
@@ -254,9 +258,13 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       this.registration.refresh()
       try {
         if (this.options.adapter.releaseChannel === undefined && channel === 'stable') {
-          await this.options.adapter.downloadAndOpen(version, controller.signal)
+          await this.options.adapter.downloadAndOpen(
+            version, controller.signal, undefined, this.options.policy.source,
+          )
         } else {
-          await this.options.adapter.downloadAndOpen(version, controller.signal, channel)
+          await this.options.adapter.downloadAndOpen(
+            version, controller.signal, channel, this.options.policy.source,
+          )
         }
       } catch {
         // Network, filesystem, and installer-opening failures are deliberately silent.

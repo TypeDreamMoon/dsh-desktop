@@ -2,11 +2,17 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_CURRENT_VERSION_HEADER,
   DESKTOP_VERSION_ENDPOINT,
+  GITHUB_API_ACCEPT,
+  GITHUB_API_VERSION,
+  MAX_GITHUB_RELEASES_RESPONSE_BYTES,
   MAX_VERSION_RESPONSE_BYTES,
+  checkForDesktopUpdate,
   checkForStableUpdate,
   compareSemVerVersions,
   desktopVersionRequestHeaders,
+  githubReleasesEndpoint,
   parseSemVer,
+  resolveGithubDesktopRelease,
   type UpdateRequest,
 } from '../src/update-checker.ts'
 import {
@@ -205,5 +211,143 @@ describe('public Desktop version check', () => {
 
     await expect(checkForStableUpdate({ currentVersion, request })).resolves.toBeNull()
     expect(request).not.toHaveBeenCalled()
+  })
+})
+
+describe('GitHub release source', () => {
+  const githubSource = { kind: 'github', repository: 'example/fork' } as const
+
+  function release(
+    tag: string,
+    options: { draft?: boolean, prerelease?: boolean, assets?: unknown } = {},
+  ): Record<string, unknown> {
+    return {
+      tag_name: tag,
+      draft: options.draft ?? false,
+      prerelease: options.prerelease ?? false,
+      assets: options.assets ?? [],
+    }
+  }
+
+  function installerAsset(version: string): Record<string, unknown> {
+    return {
+      name: `DSH-Desktop-${version}-x64-Setup.exe`,
+      browser_download_url: `https://github.com/example/fork/releases/download/v${version}/DSH-Desktop-${version}-x64-Setup.exe`,
+    }
+  }
+
+  it("lists a repository's releases and reports a newer stable version without leaking the installation id", async () => {
+    const calls: Array<{ url: string, init: RequestInit }> = []
+    const request: UpdateRequest = async (url, init) => {
+      calls.push({ url, init })
+      return Response.json([
+        release('v2.0.12', { assets: [installerAsset('2.0.12')] }),
+        release('v2.0.13', { draft: true, assets: [installerAsset('2.0.13')] }),
+        release('v2.0.11-beta.2', { prerelease: true, assets: [installerAsset('2.0.11-beta.2')] }),
+        release('not-a-version'),
+      ])
+    }
+
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.10',
+      channel: 'stable',
+      source: githubSource,
+      installationId: INSTALLATION_ID,
+      request,
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.0.10',
+      latestVersion: '2.0.12',
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.url).toBe(githubReleasesEndpoint('example/fork'))
+    expect(calls[0]?.init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'error' })
+    const headers = new Headers(calls[0]?.init.headers)
+    expect(headers.get('accept')).toBe(GITHUB_API_ACCEPT)
+    expect(headers.get('x-github-api-version')).toBe(GITHUB_API_VERSION)
+    expect(headers.get('user-agent')).toBe('dsh-desktop-updater')
+    expect(headers.has(DESKTOP_INSTALLATION_ID_HEADER)).toBe(false)
+  })
+
+  it('selects the newest beta release for the beta channel', async () => {
+    const request: UpdateRequest = async () => Response.json([
+      release('v2.0.12', { assets: [installerAsset('2.0.12')] }),
+      release('v2.0.11-beta.2', { prerelease: true, assets: [installerAsset('2.0.11-beta.2')] }),
+      release('v2.0.12-beta.1', { prerelease: true, assets: [installerAsset('2.0.12-beta.1')] }),
+    ])
+
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.11-beta.2',
+      channel: 'beta',
+      source: githubSource,
+      request,
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.0.11-beta.2',
+      latestVersion: '2.0.12-beta.1',
+    })
+  })
+
+  it('reports up-to-date when the newest matching release is not newer', async () => {
+    const request: UpdateRequest = async () => Response.json([
+      release('v2.0.10', { assets: [installerAsset('2.0.10')] }),
+    ])
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.10',
+      channel: 'stable',
+      source: githubSource,
+      request,
+    })).resolves.toEqual({ status: 'up-to-date', currentVersion: '2.0.10', latestVersion: '2.0.10' })
+  })
+
+  it('resolves an exact version and keeps only HTTPS asset URLs', async () => {
+    const request: UpdateRequest = async () => Response.json([
+      release('v2.0.12', {
+        assets: [
+          installerAsset('2.0.12'),
+          { name: 'evil.exe', browser_download_url: 'http://example.com/evil.exe' },
+          { name: '', browser_download_url: 'https://example.com/empty.exe' },
+        ],
+      }),
+    ])
+
+    await expect(resolveGithubDesktopRelease({
+      repository: 'example/fork',
+      channel: 'stable',
+      version: '2.0.12',
+      request,
+    })).resolves.toEqual({
+      version: '2.0.12',
+      channel: 'stable',
+      assets: [{ name: `DSH-Desktop-2.0.12-x64-Setup.exe`, url: expect.stringContaining('github.com/example/fork') }],
+    })
+  })
+
+  it('silently ignores GitHub failures, drafts-only listings, and oversized bodies', async () => {
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.10',
+      channel: 'stable',
+      source: githubSource,
+      request: async () => new Response('unavailable', { status: 503 }),
+    })).resolves.toBeNull()
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.10',
+      channel: 'stable',
+      source: githubSource,
+      request: async () => Response.json([{ tag_name: 'v2.0.12', draft: true, prerelease: false, assets: [] }]),
+    })).resolves.toBeNull()
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.10',
+      channel: 'stable',
+      source: githubSource,
+      request: async () => new Response('x'.repeat(MAX_GITHUB_RELEASES_RESPONSE_BYTES + 1)),
+    })).resolves.toBeNull()
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.10',
+      channel: 'stable',
+      source: githubSource,
+      request: async () => { throw new TypeError('offline') },
+    })).resolves.toBeNull()
   })
 })

@@ -56,6 +56,7 @@ import {
   type DesktopUpdateArtifact,
 } from './update-download.ts'
 import type { UpdateCheckResult } from './update-checker.ts'
+import { OFFICIAL_UPDATE_SOURCE, type DesktopUpdateSource } from './update-source.ts'
 import type { DesktopInstallationId } from './desktop-installation-id.ts'
 import { DESKTOP_RELEASE_CHANNEL } from './product-identity.ts'
 import type { DesktopReleaseChannel } from './update-checker.ts'
@@ -149,7 +150,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       request: (url, init) => net.fetch(url, init),
       confirmDownload: (version, channel) => this.confirmUpdateDownload(version, channel),
       showManualCheckResult: result => this.showManualUpdateCheckResult(result),
-      downloadAndOpen: (version, signal, channel) => this.downloadAndOpenUpdate(version, signal, channel),
+      downloadAndOpen: (version, signal, channel, source) =>
+        this.downloadAndOpenUpdate(version, signal, channel, source),
       notify: notification => { this.showNotification(notification) },
     }
   }
@@ -692,6 +694,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     version: string,
     signal: AbortSignal,
     channel: DesktopReleaseChannel = 'stable',
+    source: DesktopUpdateSource = OFFICIAL_UPDATE_SOURCE,
   ): Promise<void> {
     const copy = desktopNativeCopy(this.currentLocale)
     const platform = this.platformStrategy.updateDownloadPlatform
@@ -705,6 +708,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       platform,
       version,
       ...(channel === 'stable' ? {} : { channel }),
+      source,
       destinationPath,
       request: (url, init) => net.fetch(url, init),
       signal,

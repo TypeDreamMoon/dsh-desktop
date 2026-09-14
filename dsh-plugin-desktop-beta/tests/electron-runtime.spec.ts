@@ -2398,6 +2398,7 @@ describe('Electron desktop runtime', () => {
       platform: 'darwin',
       version: '2.1.0',
       destinationPath: '/tmp/Downloads/DSH-Desktop-2.1.0-mac.dmg',
+      source: { kind: 'official' },
       request: expect.any(Function),
       signal: controller.signal,
     })
