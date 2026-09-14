@@ -36,4 +36,16 @@ describe('RC1 browse directory-picker client patch', () => {
     }
     expect(patch).not.toContain('if (path === null) onClose()')
   })
+
+  it('keeps the filesystem root reachable so a disk root can be adopted', () => {
+    for (const marker of [
+      'the filesystem/drive root must stay reachable',
+      'const root = listing.crumbs[0];',
+      'return homeLabel === "" || root === void 0 || root.path === home.path',
+      '? [home, ...tail]',
+      ': [root, home, ...tail];',
+    ]) {
+      expect(patch).toContain(marker)
+    }
+  })
 })
