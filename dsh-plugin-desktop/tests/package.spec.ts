@@ -47,7 +47,7 @@ const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), '
       target?: unknown
       x64ArchFiles?: unknown
     }
-    win?: { icon?: unknown; asarUnpack?: unknown; target?: unknown; artifactName?: unknown }
+    win?: { asar?: unknown; compression?: unknown; icon?: unknown; asarUnpack?: unknown; target?: unknown; artifactName?: unknown }
     nsis?: Record<string, unknown>
     portable?: Record<string, unknown>
     linux?: { icon?: unknown; asarUnpack?: unknown }
@@ -64,7 +64,7 @@ const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', worksp
 }
 const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoot), 'utf8')
 const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
-const runtimeVersion = '0.1.5-rc.1'
+const runtimeVersion = '0.1.5-rc.2'
 const betaRuntimeVersion = (JSON.parse(readFileSync(
   new URL('dsh-plugin-desktop-beta/package.json', workspaceRoot), 'utf8',
 )) as { dependencies: Record<string, string> }).dependencies['@deepseek-ai/dsh']
@@ -193,7 +193,7 @@ describe('published package surface', () => {
   })
 
   it('patches the browse panel with the Windows native-picker icon bridge', () => {
-    const patchPath = './patches/dsh-client-ui-directory-picker-browse@0.1.5-rc.1.patch'
+    const patchPath = './patches/dsh-client-ui-directory-picker-browse@0.1.5-rc.2.patch'
     expect(dshResolution('@deepseek-ai/dsh-client-ui-directory-picker-browse'))
       .toContain(patchPath)
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
@@ -217,7 +217,7 @@ describe('published package surface', () => {
   })
 
   it('patches the browse backend to skip unreadable directory-looking entries', () => {
-    const patchPath = './patches/dsh-host-directory-picker-browse@0.1.5-rc.1.patch'
+    const patchPath = './patches/dsh-host-directory-picker-browse@0.1.5-rc.2.patch'
     expect(dshResolution('@deepseek-ai/dsh-host-directory-picker-browse'))
       .toContain(patchPath)
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
@@ -236,7 +236,7 @@ describe('published package surface', () => {
   })
 
   it('gives the Desktop settings section a dedicated display icon', () => {
-    const patchPath = './patches/dsh-client-ui-settings-general@0.1.5-rc.1.patch'
+    const patchPath = './patches/dsh-client-ui-settings-general@0.1.5-rc.2.patch'
     expect(dshResolution('@deepseek-ai/dsh-client-ui-settings-general'))
       .toContain(patchPath)
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
@@ -255,7 +255,7 @@ describe('published package surface', () => {
   })
 
   it('keeps wide Markdown table scrollbars visible without hover', () => {
-    const patchPath = './patches/dsh-client-ui-primitives@0.1.5-rc.1.patch'
+    const patchPath = './patches/dsh-client-ui-primitives@0.1.5-rc.2.patch'
     expect(dshResolution('@deepseek-ai/dsh-client-ui-primitives')).toContain(patchPath)
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
     const installedStyles = readFileSync(new URL(
@@ -290,17 +290,17 @@ describe('published package surface', () => {
     expect(new Set([...stableResolutions, ...betaResolutions].map(([selector]) => selector)).size)
       .toBe(dshResolutions.length)
     for (const [selector, resolution] of stableResolutions) {
-      expect(selector).toMatch(/@npm:\^?0\.1\.5-rc\.1$/u)
+      expect(selector).toMatch(/@npm:\^?0\.1\.5-rc\.2$/u)
       expect(String(resolution)).toContain(runtimeVersion)
     }
     for (const [selector, resolution] of betaResolutions) {
-      expect(selector).toMatch(/@npm:\^?0\.1\.5-rc\.1$/u)
+      expect(selector).toMatch(/@npm:\^?0\.1\.5-rc\.2$/u)
       expect(String(resolution)).toContain(betaRuntimeVersion)
     }
   })
 
   it('keeps the canonical web profile configurable while Desktop disables browser opening', () => {
-    const patchPath = './patches/dsh-web-app@0.1.5-rc.1.patch'
+    const patchPath = './patches/dsh-web-app@0.1.5-rc.2.patch'
     const openPatchPath = './patches/open@11.0.1.patch'
     const openPatchResolution = `patch:open@npm%3A11.0.1#${openPatchPath}`
     expect(dshResolution('@deepseek-ai/dsh-web-app')).toContain(patchPath)
@@ -761,36 +761,18 @@ describe('published package surface', () => {
 
   it('fixes the installed application identity', () => {
     expect(workspaceManifest.version).toBeUndefined()
-    expect(manifest.version).toBe('2.0.9')
+    expect(manifest.version).toBe('2.0.10')
     expect(manifest.build?.productName).toBe('DSH Desktop')
     expect(manifest.build?.appId).toBe('ai.deepseek.dsh.desktop')
-    expect(manifest.build?.asar).toEqual({ smartUnpack: true })
+    expect(manifest.build?.asar).toBe(false)
     expect(manifest.build).not.toHaveProperty('asarUnpack')
-    expect(manifest.build?.mac?.asarUnpack).toEqual([
-      'build/app-icon-mac.png',
-      'build/tray-iconTemplate.png',
-      'build/tray-iconTemplate@2x.png',
-      'node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**',
-    ])
-    const windowsAndLinuxIcons = [
-      'build/app-icon.png',
-      'build/tray-icon-blue.png',
-      'build/tray-icon-blue@1.25x.png',
-      'build/tray-icon-blue@1.5x.png',
-      'build/tray-icon-blue@2x.png',
-    ]
-    expect(manifest.build?.win?.asarUnpack).toEqual([...windowsAndLinuxIcons, 'node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**'])
-    // Sharp keeps libvips in a sibling package on Linux and ships it as
-    // `libvips-cpp.so.<version>`, which smart unpack cannot recognise as a native
-    // library. Without this the packaged Host fails to boot on Linux.
-    expect(manifest.build?.linux?.asarUnpack).toEqual([
-      ...windowsAndLinuxIcons,
-      'node_modules/@agents-anywhere/dsh-bridge-next/lib/bundled-connector/**',
-      'node_modules/@img/sharp-libvips-linux-*/lib/libvips-cpp.so.*',
-    ])
+    for (const platform of ['mac', 'win', 'linux'] as const) {
+      expect(manifest.build?.[platform]).toMatchObject({ asar: false })
+      expect(manifest.build?.[platform]).not.toHaveProperty('asarUnpack')
+    }
     expect(manifest.build?.electronFuses).toEqual({
-      enableEmbeddedAsarIntegrityValidation: true,
-      onlyLoadAppFromAsar: true,
+      enableEmbeddedAsarIntegrityValidation: false,
+      onlyLoadAppFromAsar: false,
       resetAdHocDarwinSignature: true,
       runAsNode: true,
     })
@@ -1136,8 +1118,8 @@ describe('published package surface', () => {
   })
 
   it('hides official plugin-manager and general subprocess consoles on Windows', () => {
-    const dshPatchPath = './patches/dsh@0.1.5-rc.1.patch'
-    const subprocessPatchPath = './patches/dsh-subprocess-local@0.1.5-rc.1.patch'
+    const dshPatchPath = './patches/dsh@0.1.5-rc.2.patch'
+    const subprocessPatchPath = './patches/dsh-subprocess-local@0.1.5-rc.2.patch'
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
     const dshPatch = readFileSync(new URL(dshPatchPath, workspaceRoot), 'utf8')
     const workspaceRequire = createRequire(new URL('package.json', packageRoot))
@@ -1244,9 +1226,9 @@ describe('published package surface', () => {
   })
 
   it('starts restricted Windows shells with a hidden console show state', () => {
-    const patchPath = './patches/dsh-win32-process@0.1.5-rc.1.patch'
+    const patchPath = './patches/dsh-win32-process@0.1.5-rc.2.patch'
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
-    const patch = readFileSync(new URL('patches/dsh-win32-process@0.1.5-rc.1.patch', workspaceRoot), 'utf8')
+    const patch = readFileSync(new URL('patches/dsh-win32-process@0.1.5-rc.2.patch', workspaceRoot), 'utf8')
     const workspaceRequire = createRequire(new URL('package.json', packageRoot))
     const sandboxManifest = workspaceRequire.resolve('@deepseek-ai/dsh-sandbox-windows-acl/package.json')
     const sandboxRequire = createRequire(sandboxManifest)
