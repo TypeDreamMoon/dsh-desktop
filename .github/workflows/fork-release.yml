@@ -163,6 +163,10 @@ jobs:
           set -euo pipefail
           repo="$GITHUB_REPOSITORY"
           if ! gh release view "$TAG" -R "$repo" >/dev/null 2>&1; then
-            gh release create "$TAG" -R "$repo" --title "$TAG" --generate-notes
+            if [[ "$TAG" == *"-beta."* ]]; then
+              gh release create "$TAG" -R "$repo" --title "$TAG" --generate-notes --prerelease
+            else
+              gh release create "$TAG" -R "$repo" --title "$TAG" --generate-notes
+            fi
           fi
           find release-assets -type f -print0 | xargs -0 --no-run-if-empty gh release upload "$TAG" -R "$repo" --clobber
