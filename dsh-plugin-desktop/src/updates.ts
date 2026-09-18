@@ -8,6 +8,7 @@ import { DESKTOP_UPDATE_CHECK_PATH } from './desktop-settings-contract.ts'
 import { handleDesktopUpdateCheckRequest } from './desktop-settings-route.ts'
 import type {} from './runtime.ts'
 import { startDesktopUpdateLifecycle } from './update-lifecycle.ts'
+import { parseDesktopUpdateChannel } from './update-channel.ts'
 import { parseDesktopUpdateSource } from './update-source.ts'
 
 /** Stable Cordis plugin name. */
@@ -33,6 +34,11 @@ export interface Config {
    * Desktop service, `github:<owner>/<repo>` uses that repository's Releases.
    */
   releaseSource: string
+  /**
+   * Followed update stream: uto (default) follows the installed edition,
+   * stable or eta pins the stream independent of the running package.
+   */
+  releaseChannel: string
 }
 
 /** Validated scheduled update policy. */
@@ -42,6 +48,7 @@ export const Config: z<Config> = z.object({
   intervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(6 * 60 * 60 * 1000),
   requestTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(15_000),
   releaseSource: z.string().default('official'),
+  releaseChannel: z.string().default('auto'),
 })
 
 /**
@@ -51,6 +58,7 @@ export const Config: z<Config> = z.object({
  */
 export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
+    const channel = parseDesktopUpdateChannel(config.releaseChannel)
     const lifecycle = startDesktopUpdateLifecycle({
       adapter: ctx.desktopRuntime.updates,
       policy: {
@@ -59,6 +67,7 @@ export function apply(ctx: Context, config: Config): void {
         intervalMs: config.intervalMs,
         requestTimeoutMs: config.requestTimeoutMs,
         source: parseDesktopUpdateSource(config.releaseSource),
+        ...(channel === undefined ? {} : { channel }),
       },
       locale: () => ctx.desktopRuntime.locale,
       registerTrayItem: item => ctx.desktopRuntime.registerTrayItem(item),

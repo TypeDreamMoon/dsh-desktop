@@ -26,6 +26,8 @@ export interface DesktopUpdatePolicy {
   readonly initialDelayMs: number
   readonly intervalMs: number
   readonly requestTimeoutMs: number
+  /** Pinned release stream; omitted follows the installed edition's channel. */
+  readonly channel?: DesktopReleaseChannel
   /** Release source used by version checks and installer downloads. */
   readonly source: DesktopUpdateSource
 }
@@ -92,7 +94,7 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       label: () => this.trayLabel(),
       invoke: () => this.checkNow(),
     })
-    this.stableRegistration = options.adapter.releaseChannel === 'beta'
+    this.stableRegistration = this.preferredChannel === 'beta'
       ? options.registerTrayItem({
           group: 'status',
           order: 11,
@@ -125,8 +127,13 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
     return this.runManualCheck()
   }
 
+  /** Stream this lifecycle follows: the pinned config, else the installed edition's own. */
+  private get preferredChannel(): DesktopReleaseChannel {
+    return this.options.policy.channel ?? this.options.adapter.releaseChannel ?? 'stable'
+  }
+
   private installStable(): Promise<void> {
-    if (this.options.adapter.releaseChannel !== 'beta') return Promise.resolve()
+    if (this.preferredChannel !== 'beta') return Promise.resolve()
     this.manualTask ??= (async () => {
       const result = await this.startCheck('stable', true)
       if (this.disposed) return
@@ -173,7 +180,7 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
   }
 
   private startCheck(
-    channel: DesktopReleaseChannel = this.options.adapter.releaseChannel ?? 'stable',
+    channel: DesktopReleaseChannel = this.preferredChannel,
     allowDowngrade: boolean = false,
   ): Promise<UpdateCheckResult | null> {
     if (this.checkTask !== undefined) {
@@ -230,7 +237,7 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
 
   private startDownload(
     version: string,
-    channel: DesktopReleaseChannel = this.options.adapter.releaseChannel ?? 'stable',
+    channel: DesktopReleaseChannel = this.preferredChannel,
     allowDowngrade: boolean = false,
   ): Promise<void> {
     if (this.downloadTask !== undefined) return this.downloadTask

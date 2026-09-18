@@ -19,9 +19,15 @@
     - id: desktop-updates
       name: dsh-plugin-desktop/updates
       config:
-        # Self-maintained fork: resolve releases from this repository's GitHub Releases.
-        # Use official to follow the DSH Desktop release service instead.
-        releaseSource: github:TypeDreamMoon/dsh-desktop
+        # fork = TypeDreamMoon/dsh-desktop Releases (this repository),
+        # upstream = anywhere-labs/dsh-desktop Releases,
+        # official = the DSH Desktop release service,
+        # github:<owner>/<repo> = any other repository.
+        releaseSource: fork
+        # auto follows the installed edition's own stream. Set stable or
+        # beta to pin the stream; a machine-wide cordis.patch.yml in the DSH
+        # home may override this row without rebuilding.
+        releaseChannel: auto
 
 # A desktop launch has no terminal operator waiting for the Web readiness line.
 - id: web-runtime

@@ -27,6 +27,7 @@ const testConfig: UpdateConfig = {
   intervalMs: 1000,
   requestTimeoutMs: 1000,
   releaseSource: 'official',
+  releaseChannel: 'auto',
 }
 
 function versionResponse(version: unknown): Response {
@@ -187,6 +188,7 @@ describe('desktop update Host plugin', () => {
       intervalMs: 21_600_000,
       requestTimeoutMs: 15_000,
       releaseSource: 'official',
+      releaseChannel: 'auto',
     })
     expect(() => Config({ intervalMs: 0 } as UpdateConfig)).toThrow()
     expect(() => Config({ requestTimeoutMs: 0 } as UpdateConfig)).toThrow()
@@ -643,6 +645,32 @@ describe('desktop update Host plugin', () => {
       expect.any(AbortSignal),
       undefined,
       { kind: 'github', repository: 'example/fork' },
+    )
+    await harness.dispose()
+  })
+  it('follows a pinned beta channel while running the stable edition', async () => {
+    const request = vi.fn(async (_url: string, init: RequestInit) => {
+      const channel = new Headers(init.headers).get(DESKTOP_RELEASE_CHANNEL_HEADER)
+      return Response.json(channel === 'beta'
+        ? { version: '2.1.0-beta.1', channel: 'beta' }
+        : { version: '2.0.0', channel: 'stable' })
+    })
+    const harness = await createHarness({
+      releaseChannel: 'stable',
+      currentVersion: '2.0.0',
+      request,
+      confirmDownload: async () => true,
+      config: { ...testConfig, releaseChannel: 'beta' },
+    })
+
+    await harness.tray.invoke()
+
+    expect(harness.confirmDownload).toHaveBeenCalledWith('2.1.0-beta.1', 'beta')
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith(
+      '2.1.0-beta.1',
+      expect.any(AbortSignal),
+      'beta',
+      OFFICIAL_UPDATE_SOURCE,
     )
     await harness.dispose()
   })
