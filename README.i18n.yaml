@@ -2,4 +2,4 @@
 # confirmed-consistent state. Both languages carry equal authority. Update both files
 # and re-record their hashes after editing either side.
 README.md: ebded1c709213196478ce8b5b7b3a11f3c9636ed
-README.en.md: a1104e0919c23ac3e23f9cc8503e6657d7546594
+README.en.md: 336790e5726a81cc7e1acb26e38a0b5ee042efc2
