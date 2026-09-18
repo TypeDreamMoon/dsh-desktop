@@ -127,6 +127,17 @@ export interface DesktopSettings {
   networkExposure: DesktopNetworkExposure
   /** Log verbosity threshold applied to the file logger. */
   logLevel: 'debug' | 'info' | 'warn' | 'error'
+  /**
+   * Update source for the next generation. Empty follows the packaged
+   * `desktop-updates` config; otherwise `fork`, `upstream`, `official`,
+   * or `github:<owner>/<repo>`.
+   */
+  updateSource: string
+  /**
+   * Update channel for the next generation. Empty follows the packaged
+   * `desktop-updates` config; otherwise `auto`, `stable`, or `beta`.
+   */
+  updateChannel: string
 }
 
 /** Schema registered with the standard settings service. */
@@ -138,6 +149,8 @@ export const DesktopSettingsSchema: z<DesktopSettings> = z.object({
   openBrowser: z.boolean().default(false),
   networkExposure: z.union(['loopback', 'lan'] as const).default('loopback'),
   logLevel: z.union(['debug', 'info', 'warn', 'error'] as const).default('info'),
+  updateSource: z.string().default(''),
+  updateChannel: z.string().default(''),
 })
 
 /** Native window configuration. */

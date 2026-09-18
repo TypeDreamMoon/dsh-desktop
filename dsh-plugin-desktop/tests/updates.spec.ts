@@ -65,6 +65,7 @@ async function createHarness(options: {
   readonly notify?: (notification: DesktopNotification) => void
   readonly locale?: DesktopRuntime['locale']
   readonly state?: string
+  readonly desktopSettings?: { readonly updateSource?: string; readonly updateChannel?: string }
 } = {}): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-updates-'))
   const statePath = join(root, 'private', 'state.json')
@@ -108,6 +109,7 @@ async function createHarness(options: {
   } as unknown as DesktopRuntime
   const ctx = {
     desktopRuntime: runtime,
+    settings: { get: () => options.desktopSettings ?? {} },
     webServer: {
       port: 43120,
       register: (registered: WebRoute) => {
@@ -181,7 +183,7 @@ describe('desktop update Host plugin', () => {
   })
 
   it('exposes the packaged 60-second and six-hour background policy', () => {
-    expect(inject).toEqual(['desktopRuntime', 'webServer', 'connection'])
+    expect(inject).toEqual(['desktopRuntime', 'webServer', 'connection', 'settings'])
     expect(Config({} as UpdateConfig)).toEqual({
       enabled: true,
       initialDelayMs: 60_000,
@@ -674,4 +676,33 @@ describe('desktop update Host plugin', () => {
     )
     await harness.dispose()
   })
+  it('lets desktop settings override the packaged update source and channel', async () => {
+    const request = vi.fn(async (url: string) => {
+      expect(url).toBe('https://api.github.com/repos/TypeDreamMoon/dsh-desktop/releases?per_page=100')
+      return Response.json([{
+        tag_name: 'v2.1.0-beta.1',
+        draft: false,
+        prerelease: true,
+        assets: [],
+      }])
+    })
+    const harness = await createHarness({
+      releaseChannel: 'stable',
+      currentVersion: '2.0.0',
+      request,
+      confirmDownload: async () => true,
+      desktopSettings: { updateSource: 'fork', updateChannel: 'beta' },
+    })
+
+    await harness.tray.invoke()
+
+    expect(harness.downloadAndOpen).toHaveBeenCalledWith(
+      '2.1.0-beta.1',
+      expect.any(AbortSignal),
+      'beta',
+      { kind: 'github', repository: 'TypeDreamMoon/dsh-desktop' },
+    )
+    await harness.dispose()
+  })
+
 })

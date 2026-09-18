@@ -24,6 +24,10 @@ export interface DesktopShellSettings {
   readonly openBrowser: boolean
   readonly networkExposure: 'loopback' | 'lan'
   readonly logLevel: 'debug' | 'info' | 'warn' | 'error'
+  /** Update source override; empty follows the packaged desktop-updates config. */
+  readonly updateSource: string
+  /** Update channel override; empty follows the packaged desktop-updates config. */
+  readonly updateChannel: string
 }
 
 /** Browser view of the Host `dsh-desktop-notifications` settings namespace. */
@@ -53,7 +57,7 @@ export type DesktopSettingsSectionProps =
   & InjectFace<DesktopSettingsSectionInjected>
 
 type Translate = DesktopSettingsSectionProps['t']
-type BusyOperation = 'load' | 'create-profile' | 'select-profile' | 'delete-profile' | 'select-aa' | 'select-market' | 'mode' | 'material' | 'web' | 'notification'
+type BusyOperation = 'load' | 'create-profile' | 'select-profile' | 'delete-profile' | 'select-aa' | 'select-market' | 'mode' | 'material' | 'web' | 'notification' | 'update'
 type RestartState = 'none' | 'restarting' | 'required'
 type LanPollWait = (signal: AbortSignal) => Promise<void>
 
@@ -486,6 +490,26 @@ export function DesktopSettingsSection({
     })
   }
 
+  const setUpdateSource = (next: string): void => {
+    void run('update', async () => {
+      if (next !== '' && next !== 'fork' && next !== 'upstream' && next !== 'official') {
+        throw new Error(`dsh-plugin-desktop: invalid update source ${JSON.stringify(next)}`)
+      }
+      await desktopSettings.set('updateSource', next)
+      requestRestart()
+    })
+  }
+
+  const setUpdateChannel = (next: string): void => {
+    void run('update', async () => {
+      if (next !== '' && next !== 'auto' && next !== 'stable' && next !== 'beta') {
+        throw new Error(`dsh-plugin-desktop: invalid update channel ${JSON.stringify(next)}`)
+      }
+      await desktopSettings.set('updateChannel', next)
+      requestRestart()
+    })
+  }
+
   return (
     <div className="dshDesktopSettings">
       <header className="dshDesktopSettingsHeader">
@@ -713,6 +737,46 @@ export function DesktopSettingsSection({
         )}
       </section>
 
+      <section className="dshDesktopSettingsGroup" aria-labelledby="dsh-desktop-updates-title">
+        <div>
+          <h3 id="dsh-desktop-updates-title">{t('updatesTitle')}</h3>
+          <p className="dshDesktopSettingsGroupIntro">{t('updatesIntro')}</p>
+        </div>
+        <label className="dshDesktopSettingsMaterialField">
+          <span className="dshDesktopSettingsMaterialCopy">
+            <span className="dshDesktopSettingsChoiceTitle">{t('updateSource')}</span>
+            <span className="dshDesktopSettingsChoiceBody">{t('updateSourceBody')}</span>
+          </span>
+          <select
+            className="dshDesktopSettingsSelect"
+            value={desktop.value?.updateSource ?? ''}
+            disabled={!settingsWritable || busy !== undefined || restart !== 'none'}
+            onChange={event => { setUpdateSource(event.currentTarget.value) }}
+          >
+            <option value="">{t('updateSourceConfig')}</option>
+            <option value="fork">{t('updateSourceFork')}</option>
+            <option value="upstream">{t('updateSourceUpstream')}</option>
+            <option value="official">{t('updateSourceOfficial')}</option>
+          </select>
+        </label>
+        <label className="dshDesktopSettingsMaterialField">
+          <span className="dshDesktopSettingsMaterialCopy">
+            <span className="dshDesktopSettingsChoiceTitle">{t('updateChannel')}</span>
+            <span className="dshDesktopSettingsChoiceBody">{t('updateChannelBody')}</span>
+          </span>
+          <select
+            className="dshDesktopSettingsSelect"
+            value={desktop.value?.updateChannel ?? ''}
+            disabled={!settingsWritable || busy !== undefined || restart !== 'none'}
+            onChange={event => { setUpdateChannel(event.currentTarget.value) }}
+          >
+            <option value="">{t('updateChannelConfig')}</option>
+            <option value="auto">{t('updateChannelAuto')}</option>
+            <option value="stable">{t('updateChannelStable')}</option>
+            <option value="beta">{t('updateChannelBeta')}</option>
+          </select>
+        </label>
+      </section>
       <section className="dshDesktopSettingsGroup" aria-labelledby="dsh-desktop-web-title">
         <div>
           <h3 id="dsh-desktop-web-title">{t('webTitle')}</h3>

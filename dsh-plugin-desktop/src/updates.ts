@@ -9,15 +9,55 @@ import { handleDesktopUpdateCheckRequest } from './desktop-settings-route.ts'
 import type {} from './runtime.ts'
 import { startDesktopUpdateLifecycle } from './update-lifecycle.ts'
 import { parseDesktopUpdateChannel } from './update-channel.ts'
-import { parseDesktopUpdateSource } from './update-source.ts'
+import type { DesktopReleaseChannel } from './update-checker.ts'
+import { parseDesktopUpdateSource, type DesktopUpdateSource } from './update-source.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-updates'
 
 /** Native adapter required for network, tray, confirmation, and installer access. */
-export const inject = ['desktopRuntime', 'webServer', 'connection']
+export const inject = ['desktopRuntime', 'webServer', 'connection', 'settings']
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/** Settings namespace carrying Desktop-wide preferences. */
+const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
+
+/** Subset of the Desktop settings namespace this plugin consumes. */
+interface DesktopUpdateSettings {
+  readonly updateSource?: string
+  readonly updateChannel?: string
+}
+
+/** Non-empty settings override, else the packaged plugin config value. */
+function settingsOverride(value: string | undefined, fallback: string): string {
+  return value !== undefined && value.trim() !== '' ? value : fallback
+}
+
+/** Read the Desktop settings namespace; undefined before it registers. */
+function readDesktopUpdateSettings(ctx: Context): DesktopUpdateSettings | undefined {
+  try {
+    return ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopUpdateSettings | undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolveUpdateSource(value: string, fallback: string): DesktopUpdateSource {
+  try {
+    return parseDesktopUpdateSource(value)
+  } catch {
+    return parseDesktopUpdateSource(fallback)
+  }
+}
+
+function resolveUpdateChannel(value: string, fallback: string): DesktopReleaseChannel | undefined {
+  try {
+    return parseDesktopUpdateChannel(value)
+  } catch {
+    return parseDesktopUpdateChannel(fallback)
+  }
+}
 
 /** Scheduled update policy. */
 export interface Config {
@@ -58,7 +98,9 @@ export const Config: z<Config> = z.object({
  */
 export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
-    const channel = parseDesktopUpdateChannel(config.releaseChannel)
+    const settings = readDesktopUpdateSettings(ctx)
+    const source = resolveUpdateSource(settingsOverride(settings?.updateSource, config.releaseSource), config.releaseSource)
+    const channel = resolveUpdateChannel(settingsOverride(settings?.updateChannel, config.releaseChannel), config.releaseChannel)
     const lifecycle = startDesktopUpdateLifecycle({
       adapter: ctx.desktopRuntime.updates,
       policy: {
@@ -66,7 +108,7 @@ export function apply(ctx: Context, config: Config): void {
         initialDelayMs: config.initialDelayMs,
         intervalMs: config.intervalMs,
         requestTimeoutMs: config.requestTimeoutMs,
-        source: parseDesktopUpdateSource(config.releaseSource),
+        source,
         ...(channel === undefined ? {} : { channel }),
       },
       locale: () => ctx.desktopRuntime.locale,
