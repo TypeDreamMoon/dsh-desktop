@@ -49,6 +49,7 @@ async function mount(updateSource = '', updateChannel = '') {
       updateChannel,
     }, set),
     notificationSettings: scope({ enabled: false }),
+    shellSettings: scope({}),
   } as unknown as DesktopSettingsSectionProps
   await act(async () => { root!.render(createElement(DesktopSettingsSection, props)) })
   return {

@@ -30,6 +30,7 @@ async function mount(selectAa: (enabled: boolean) => Promise<{ accepted: true; r
     platform: 'darwin', initialMode: 'compatibility', micaSupported: false, setMode: async () => {},
     desktopSettings: scope({ mode: 'compatibility', openBrowser: false, networkExposure: 'loopback', macosMaterial: 'off', windowsMaterial: 'off' }),
     notificationSettings: scope({ enabled: false }),
+    shellSettings: scope({}),
   } as unknown as DesktopSettingsSectionProps
   await act(async () => { root!.render(createElement(DesktopSettingsSection, props)) })
   return container.querySelector('[aria-labelledby="dsh-desktop-aa-title"]')!

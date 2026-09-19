@@ -812,6 +812,9 @@ virtualStoreDirMaxLength: 60
       windowsMaterial: 'off',
       openBrowser: false,
       networkExposure: 'loopback',
+      pwshProfile: false,
+      bashPath: '',
+      gitBashPreset: false,
     })
     expect(desktopStartupSettingsFromSettings({ 'dsh-desktop': { mode: 'advanced' } })).toEqual({
       mode: 'advanced',
@@ -820,6 +823,9 @@ virtualStoreDirMaxLength: 60
       windowsMaterial: 'off',
       openBrowser: false,
       networkExposure: 'loopback',
+      pwshProfile: false,
+      bashPath: '',
+      gitBashPreset: false,
     })
     expect(desktopShellModeFromSettings({ unrelated: { enabled: true } })).toBe('compatibility')
   })
@@ -862,6 +868,12 @@ virtualStoreDirMaxLength: 60
     }
     expect(() => desktopStartupSettingsFromSettings({ 'dsh-desktop': { openBrowser: 'yes' } }))
       .toThrow('openBrowser must be a boolean')
+    expect(() => desktopStartupSettingsFromSettings({ 'dsh-desktop': { pwshProfile: 'yes' } }))
+      .toThrow('pwshProfile must be a boolean')
+    expect(() => desktopStartupSettingsFromSettings({ 'dsh-desktop': { gitBashPreset: 'yes' } }))
+      .toThrow('gitBashPreset must be a boolean')
+    expect(() => desktopStartupSettingsFromSettings({ 'dsh-desktop': { bashPath: 7 } }))
+      .toThrow('bashPath must be a string')
     expect(() => desktopStartupSettingsFromSettings({ 'dsh-desktop': { networkExposure: 'internet' } }))
       .toThrow('networkExposure must be "loopback" or "lan"')
 
@@ -989,6 +1001,67 @@ virtualStoreDirMaxLength: 60
       disabled: { __jsExpr: "process.platform !== 'win32'" },
       config: { cwd: 'C:\\workspace' },
     }))
+  })
+
+  it('projects the PowerShell profile preference into the Desktop sandbox row config', () => {    const home = temporaryHome()
+    writeFileSync(join(home, 'cordis.patch.yml'), [
+      '- id: pwsh-sandbox',
+      "  name: '@deepseek-ai/dsh-pwsh-sandbox'",
+      '  config:',
+      "    cwd: 'C:\\workspace'",
+      '',
+    ].join('\n'))
+    writeFileSync(join(home, 'settings.yaml'), [
+      'dsh-desktop:',
+      '  pwshProfile: true',
+      '',
+    ].join('\n'))
+
+    const prepared = prepareDesktopProfile(undefined, home, 'win32')
+    const rows = composeEntries([prepared.patches])
+
+    expect(rows).toContainEqual(expect.objectContaining({
+      id: 'desktop-windows-pwsh-sandbox',
+      config: { cwd: 'C:\\workspace', pwshProfile: true },
+    }))
+  })
+
+  it('materializes the Git Bash preset from the configured executable', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'settings.yaml'), [
+      'dsh-desktop:',
+      '  gitBashPreset: true',
+      "  bashPath: 'D:\\Git\\bin\\bash.exe'",
+      '',
+    ].join('\n'))
+
+    prepareDesktopProfile(undefined, home, 'win32')
+
+    const composition = readFileSync(
+      join(home, '.agent-presets', 'git-bash', 'agent.cordis.yml'),
+      'utf8',
+    )
+    expect(composition).toContain('shellPath: D:\\Git\\bin\\bash.exe')
+    expect(composition).not.toContain('@deepseek-ai/dsh-tool-pwsh')
+  })
+
+  it('fails loud when the Git Bash preset is requested without Git Bash', () => {
+    const home = temporaryHome()
+    writeFileSync(join(home, 'settings.yaml'), [
+      'dsh-desktop:',
+      '  gitBashPreset: true',
+      '',
+    ].join('\n'))
+    const saved = { ...process.env }
+    try {
+      for (const key of ['ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA', 'PATH', 'Path']) {
+        process.env[key] = 'C:\\missing'
+      }
+      expect(() => prepareDesktopProfile(undefined, home, 'win32')).toThrow(/requires Git Bash/u)
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]
+      Object.assign(process.env, saved)
+    }
   })
 
   it('rejects a bundle and user patch that register the same loader entry id', () => {

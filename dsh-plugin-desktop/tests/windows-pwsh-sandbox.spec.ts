@@ -9,6 +9,8 @@ import {
   adaptWindowsAclExecution,
   desktopWindowsPwshConfig,
   desktopWindowsPwshPath,
+  pwshProfileEnabled,
+  withoutProfileFlag,
   type WindowsAclAdaptation,
 } from '../src/windows-pwsh-sandbox.ts'
 const RUN_AS_NODE = 'ELECTRON_RUN_AS_NODE'
@@ -62,12 +64,100 @@ describe('Windows Electron PowerShell sandbox adaptation', () => {
     expect(programFilesPwsh).toBe('C:\\Program Files\\PowerShell\\7\\pwsh.exe')
   })
 
+  it('finds a PowerShell 7 installed under a relocated Program Files', () => {
+    const relocated = 'D:\\Program Files\\PowerShell\\7\\pwsh.exe'
+    const found = desktopWindowsPwshPath({
+      ProgramFiles: 'C:\\Program Files',
+      SystemRoot: 'C:\\Windows',
+      PATH: 'C:\\Windows\\system32;D:\\Program Files\\PowerShell\\7',
+    }, 'win32', path => path === relocated
+      || path === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+
+    expect(found).toBe(relocated)
+  })
+
+  it('ignores a portable pwsh even when the PATH candidate exists', () => {
+    const portable = 'D:\\AI-Agent\\tools\\pwsh\\pwsh.exe'
+    const found = desktopWindowsPwshPath({
+      ProgramFiles: 'C:\\Program Files',
+      SystemRoot: 'C:\\Windows',
+      PATH: 'D:\\AI-Agent\\tools\\pwsh',
+    }, 'win32', path => path === portable
+      || path === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+
+    expect(found).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  })
+
+  it('requires the PowerShell product directory, not only a version directory', () => {
+    const decoy = 'D:\\AI-Agent\\7\\pwsh.exe'
+    const found = desktopWindowsPwshPath({
+      ProgramFiles: 'C:\\missing',
+      SystemRoot: 'C:\\Windows',
+      PATH: 'D:\\AI-Agent\\7',
+    }, 'win32', path => path === decoy
+      || path === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+
+    expect(found).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+  })
+
+  it('reads quoted PATH entries and skips the WindowsApps alias directory', () => {
+    const alias = 'C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe'
+    const relocated = 'D:\\Program Files\\PowerShell\\7\\pwsh.exe'
+    const found = desktopWindowsPwshPath({
+      ProgramFiles: 'C:\\Program Files',
+      SystemRoot: 'C:\\Windows',
+      Path: '"C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps";"D:\\Program Files\\PowerShell\\7"',
+    }, 'win32', path => path === alias || path === relocated)
+
+    expect(found).toBe(relocated)
+  })
+
   it('keeps explicit pwshPath config and non-Windows config unchanged', () => {
     const explicit = { cwd: 'C:\\workspace', pwshPath: 'D:\\tools\\pwsh\\pwsh.exe' }
     expect(desktopWindowsPwshConfig(explicit, {}, 'win32')).toBe(explicit)
 
     const nonWindows = { cwd: '/workspace' }
     expect(desktopWindowsPwshConfig(nonWindows, {}, 'darwin')).toBe(nonWindows)
+  })
+
+  it('carries the Desktop profile preference through the row config', () => {
+    const configured = { cwd: 'C:\\workspace', pwshPath: 'D:\\pwsh.exe', pwshProfile: true }
+    expect(desktopWindowsPwshConfig(configured, {}, 'win32')).toBe(configured)
+
+    const resolved = desktopWindowsPwshConfig({ cwd: 'C:\\workspace', pwshProfile: true }, {
+      ProgramFiles: 'C:\\Program Files',
+      SystemRoot: 'C:\\Windows',
+    }, 'win32', () => true)
+
+    expect(resolved.pwshProfile).toBe(true)
+    expect(pwshProfileEnabled(resolved)).toBe(true)
+    expect(pwshProfileEnabled({ cwd: 'C:\\workspace' })).toBe(false)
+    expect(pwshProfileEnabled({ cwd: 'C:\\workspace', pwshProfile: false })).toBe(false)
+  })
+
+  it('drops only the profile-suppressing element from a pwsh argv', () => {
+    const command = '-NoProfile'
+    const argv = [
+      'D:\\pwsh.exe',
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      command,
+    ]
+
+    expect(withoutProfileFlag(argv)).toEqual([
+      'D:\\pwsh.exe',
+      '-NoLogo',
+      '-NonInteractive',
+      '-Command',
+      command,
+    ])
+    expect(withoutProfileFlag(['D:\\pwsh.exe', '-NoLogo', '-NonInteractive'])).toEqual([
+      'D:\\pwsh.exe',
+      '-NoLogo',
+      '-NonInteractive',
+    ])
   })
 
   it('defaults Windows sandbox config to a stable system PowerShell when available', () => {

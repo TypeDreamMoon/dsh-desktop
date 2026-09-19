@@ -28,6 +28,10 @@ export interface DesktopShellSettings {
   readonly updateSource: string
   /** Update channel override; empty follows the packaged desktop-updates config. */
   readonly updateChannel: string
+  /** Whether confined PowerShell commands load the user's profile instead of `-NoProfile`. */
+  readonly pwshProfile: boolean
+  /** Whether the next generation materializes the Desktop-owned Git Bash preset. */
+  readonly gitBashPreset: boolean
 }
 
 /** Browser view of the Host `dsh-desktop-notifications` settings namespace. */
@@ -39,6 +43,16 @@ export interface DesktopNotificationSettings {
   readonly notifyOnJobFailure: boolean
 }
 
+/**
+ * Browser view of the Host `shell` capability namespace, narrowed to the
+ * Windows PowerShell choice this page owns. Every other field belongs to the
+ * executor budgets the plugin settings card edits.
+ */
+export interface DesktopShellExecutorSettings {
+  /** Explicit PowerShell executable; absent follows the Desktop installation probe. */
+  readonly pwshPath?: string
+}
+
 /** Registration-side business face for the Desktop settings section. */
 export interface DesktopSettingsSectionInjected {
   readonly api: DesktopSettingsApi
@@ -48,6 +62,7 @@ export interface DesktopSettingsSectionInjected {
   readonly setMode: (mode: DesktopShellSettings['mode']) => Promise<void>
   readonly desktopSettings: SettingsScope<DesktopShellSettings>
   readonly notificationSettings: SettingsScope<DesktopNotificationSettings>
+  readonly shellSettings: SettingsScope<DesktopShellExecutorSettings>
 }
 
 /** Renderer-composed props for the official settings section entry. */
@@ -57,7 +72,7 @@ export type DesktopSettingsSectionProps =
   & InjectFace<DesktopSettingsSectionInjected>
 
 type Translate = DesktopSettingsSectionProps['t']
-type BusyOperation = 'load' | 'create-profile' | 'select-profile' | 'delete-profile' | 'select-aa' | 'select-market' | 'mode' | 'material' | 'web' | 'notification' | 'update'
+type BusyOperation = 'load' | 'create-profile' | 'select-profile' | 'delete-profile' | 'select-aa' | 'select-market' | 'mode' | 'material' | 'web' | 'notification' | 'update' | 'shell'
 type RestartState = 'none' | 'restarting' | 'required'
 type LanPollWait = (signal: AbortSignal) => Promise<void>
 
@@ -158,6 +173,21 @@ function useScope<T>(scope: SettingsScope<T>) {
   const subscribe = useCallback((listener: () => void) => scope.subscribe(listener), [scope])
   const snapshot = useCallback(() => scope.getSnapshot(), [scope])
   return useSyncExternalStore(subscribe, snapshot)
+}
+
+/**
+ * Read the user-layer PowerShell override.
+ *
+ * The draft cannot derive from the resolved value: presence in the user layer
+ * is what marks a field overridden, so an override that happens to equal the
+ * probed path must still render as an override.
+ * @param user - raw user layer of the `shell` namespace, as stored.
+ * @returns the stored override, or an empty string when the field is inherited.
+ */
+function storedPwshPathOverride(user: unknown): string {
+  if (typeof user !== 'object' || user === null) return ''
+  const stored = (user as { pwshPath?: unknown }).pwshPath
+  return typeof stored === 'string' ? stored : ''
 }
 
 function Choice({
@@ -312,11 +342,15 @@ export function DesktopSettingsSection({
   setMode: persistMode,
   desktopSettings,
   notificationSettings,
+  shellSettings,
 }: DesktopSettingsSectionProps) {
   const desktop = useScope(desktopSettings)
   const notifications = useScope(notificationSettings)
+  const shell = useScope(shellSettings)
+  const pwshPathOverride = storedPwshPathOverride(shell.user)
   const [view, setView] = useState<DesktopSettingsView>()
   const [profileName, setProfileName] = useState('')
+  const [pwshPathDraft, setPwshPathDraft] = useState('')
   const [busy, setBusy] = useState<BusyOperation | undefined>('load')
   const [loadFailed, setLoadFailed] = useState(false)
   const [operationFailed, setOperationFailed] = useState(false)
@@ -357,6 +391,7 @@ export function DesktopSettingsSection({
     const timer = setTimeout(() => { setRestart('required') }, 8_000)
     return () => { clearTimeout(timer) }
   }, [restart])
+  useEffect(() => { setPwshPathDraft(pwshPathOverride) }, [pwshPathOverride])
 
   const run = useCallback(async (operation: BusyOperation, invoke: () => Promise<void>) => {
     setBusy(operation)
@@ -374,6 +409,7 @@ export function DesktopSettingsSection({
   const requestRestart = (): void => { setRestart('restarting') }
   const settingsWritable = desktop.status === 'ready' && desktop.writable
   const notificationsWritable = notifications.status === 'ready' && notifications.writable
+  const shellWritable = shell.status === 'ready' && shell.writable
   const storedMode = desktop.value?.mode ?? initialMode
   const configuredNetworkExposure = desktop.value?.networkExposure ?? 'loopback'
   const browserAccess = desktopBrowserAccessEnabled(
@@ -506,6 +542,33 @@ export function DesktopSettingsSection({
         throw new Error(`dsh-plugin-desktop: invalid update channel ${JSON.stringify(next)}`)
       }
       await desktopSettings.set('updateChannel', next)
+      requestRestart()
+    })
+  }
+
+  const savePwshPath = (event: FormEvent): void => {
+    event.preventDefault()
+    const next = pwshPathDraft.trim()
+    void run('shell', async () => {
+      if (next.length === 0) await shellSettings.unset('pwshPath')
+      else await shellSettings.set('pwshPath', next)
+    })
+  }
+
+  const resetPwshPath = (): void => {
+    void run('shell', async () => { await shellSettings.unset('pwshPath') })
+  }
+
+  const setPwshProfile = (checked: boolean): void => {
+    void run('shell', async () => {
+      await desktopSettings.set('pwshProfile', checked)
+      requestRestart()
+    })
+  }
+
+  const setGitBashPreset = (checked: boolean): void => {
+    void run('shell', async () => {
+      await desktopSettings.set('gitBashPreset', checked)
       requestRestart()
     })
   }
@@ -736,6 +799,64 @@ export function DesktopSettingsSection({
           </label>
         )}
       </section>
+
+      {platform === 'win32' && (
+        <section className="dshDesktopSettingsGroup" aria-labelledby="dsh-desktop-shell-title">
+          <div>
+            <h3 id="dsh-desktop-shell-title">{t('shellTitle')}</h3>
+            <p className="dshDesktopSettingsGroupIntro">{t('shellIntro')}</p>
+          </div>
+          <form className="dshDesktopSettingsForm" onSubmit={savePwshPath}>
+            <label className="dshDesktopSettingsField">
+              {t('pwshPath')}
+              <input
+                className="dshDesktopSettingsInput"
+                value={pwshPathDraft}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={t('pwshPathPlaceholder')}
+                disabled={!shellWritable || busy !== undefined}
+                onChange={event => { setPwshPathDraft(event.currentTarget.value) }}
+              />
+            </label>
+            <button
+              type="submit"
+              className="dshDesktopSettingsButton"
+              disabled={!shellWritable || busy !== undefined || pwshPathDraft.trim() === pwshPathOverride}
+            >
+              {busy === 'shell' ? t('savingShell') : t('save')}
+            </button>
+            {pwshPathOverride.length > 0 && (
+              <button
+                type="button"
+                className="dshDesktopSettingsButton"
+                disabled={!shellWritable || busy !== undefined}
+                onClick={resetPwshPath}
+              >
+                {t('pwshPathAuto')}
+              </button>
+            )}
+          </form>
+          <p className="dshDesktopSettingsHint">
+            {t('pwshPathEffective')} {shell.value?.pwshPath ?? t('pwshPathUnresolved')}
+          </p>
+          <p className="dshDesktopSettingsHint">{t('pwshPathBody')}</p>
+          <ToggleRow
+            label={t('pwshProfile')}
+            checked={desktop.value?.pwshProfile ?? false}
+            disabled={!settingsWritable || busy !== undefined || restart !== 'none'}
+            onChange={checked => { setPwshProfile(checked) }}
+          />
+          <p className="dshDesktopSettingsHint">{t('pwshProfileBody')}</p>
+          <ToggleRow
+            label={t('gitBashPreset')}
+            checked={desktop.value?.gitBashPreset ?? false}
+            disabled={!settingsWritable || busy !== undefined || restart !== 'none'}
+            onChange={checked => { setGitBashPreset(checked) }}
+          />
+          <p className="dshDesktopSettingsHint">{t('gitBashPresetBody')}</p>
+        </section>
+      )}
 
       <section className="dshDesktopSettingsGroup" aria-labelledby="dsh-desktop-updates-title">
         <div>

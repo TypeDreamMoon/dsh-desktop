@@ -31,6 +31,8 @@ import FileSettingsProvider, {
   type Config as SettingsFileConfig,
 } from '@deepseek-ai/dsh-settings-file'
 import { parseAllDocuments, parseDocument } from 'yaml'
+import { desktopGitBashPath } from './git-bash.ts'
+import { generateGitBashPreset } from './git-bash-preset.ts'
 import { findOverlayPackage, resolveOverlayPackage } from './package-overlay.ts'
 import { DESKTOP_DEFAULT_WEB_PORT } from './desktop-port.ts'
 import {
@@ -96,7 +98,7 @@ const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = `${DESKTOP_PACKAGE_NAME}/windows-pwsh-sandbox`
 const AGENT_PRESETS_ROW_ID = 'agent-presets'
 /** Harness-home directory holding locally authored presets (`agent-presets/discovery`). */
-const USER_PRESET_DIRNAME = '.agent-presets'
+export const USER_PRESET_DIRNAME = '.agent-presets'
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
 const DEFAULT_DESKTOP_PORT = DESKTOP_DEFAULT_WEB_PORT
 const DESKTOP_WEB_SERVER_ROW_ID = 'desktop-webserver'
@@ -138,6 +140,41 @@ export function parseDesktopPort(value: unknown): number {
   throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.port must be an integer from 0 through 65535`)
 }
 
+/**
+ * Parse the Windows PowerShell profile preference.
+ *
+ * The confined executor applies it per command by dropping `-NoProfile`, so the
+ * value reaches the executor through the composed row config rather than the
+ * shared `shell` settings namespace, whose schema the upstream executor owns.
+ */
+function parsePwshProfile(value: unknown): boolean {
+  if (value === undefined) return false
+  if (typeof value === 'boolean') return value
+  throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.pwshProfile must be a boolean`)
+}
+
+/** Parse the Git Bash executable override; empty follows the Desktop installation probe. */
+function parseGitBashPath(value: unknown): string {
+  if (value === undefined) return ''
+  if (typeof value === 'string') return value
+  throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.bashPath must be a string`)
+}
+
+/**
+ * Parse the Git Bash preset preference.
+ *
+ * Enabling it makes the next generation materialize the Desktop-owned preset,
+ * so the value is a startup setting rather than a runtime one.
+ */
+function parseGitBashPreset(value: unknown): boolean {
+  if (value === undefined) return false
+  if (typeof value === 'boolean') return value
+  throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.gitBashPreset must be a boolean`)
+}
+
+/** Shipped preset a generated Git Bash preset derives from. */
+const GIT_BASH_PRESET_SOURCE = 'standard'
+
 /** Startup settings projected into the Loader graph before the settings plugin boots. */
 export interface DesktopStartupSettings {
   mode: DesktopShellMode
@@ -147,6 +184,12 @@ export interface DesktopStartupSettings {
   /** Persisted compatibility key for ordinary-browser access permission. */
   openBrowser: boolean
   networkExposure: DesktopNetworkExposure
+  /** Whether confined PowerShell commands load the user's profile instead of `-NoProfile`. */
+  pwshProfile: boolean
+  /** Git Bash executable override for the generated shell preset; empty follows the probe. */
+  bashPath: string
+  /** Whether the next generation materializes the Desktop-owned Git Bash preset. */
+  gitBashPreset: boolean
 }
 
 const DEFAULT_DESKTOP_STARTUP_SETTINGS: DesktopStartupSettings = Object.freeze({
@@ -156,6 +199,9 @@ const DEFAULT_DESKTOP_STARTUP_SETTINGS: DesktopStartupSettings = Object.freeze({
   windowsMaterial: DEFAULT_WINDOWS_WINDOW_MATERIAL,
   openBrowser: false,
   networkExposure: 'loopback',
+  pwshProfile: false,
+  bashPath: '',
+  gitBashPreset: false,
 })
 
 /**
@@ -189,6 +235,9 @@ export function desktopStartupSettingsFromSettings(document: unknown): DesktopSt
     windowsMaterial: parseWindowsWindowMaterial(values.windowsMaterial),
     openBrowser,
     networkExposure: desktopNetworkExposureForBrowserAccess(openBrowser, networkExposure),
+    pwshProfile: parsePwshProfile(values.pwshProfile),
+    bashPath: parseGitBashPath(values.bashPath),
+    gitBashPreset: parseGitBashPreset(values.gitBashPreset),
   }
 }
 
@@ -975,6 +1024,9 @@ export function prepareDesktopProfile(
     windowsMaterial,
     openBrowser,
     networkExposure,
+    pwshProfile,
+    bashPath,
+    gitBashPreset,
   } = readDesktopStartupSettings(settingsConfig)
   patches.push({
     id: 'settings',
@@ -1023,6 +1075,13 @@ export function prepareDesktopProfile(
       config: { ...rowConfig(presets), roots, includeUserRoot: false },
     })
   }
+  if (platform === 'win32' && gitBashPreset) {
+    const resolvedBash = bashPath.length > 0 ? bashPath : desktopGitBashPath(process.env, platform)
+    if (resolvedBash === undefined) {
+      throw new Error(`${BIN_NAME}: ${DESKTOP_SETTINGS_NAMESPACE}.gitBashPreset requires Git Bash; set ${DESKTOP_SETTINGS_NAMESPACE}.bashPath or install Git for Windows`)
+    }
+    generateGitBashPreset(shippedPresetRoot(), join(home, USER_PRESET_DIRNAME), GIT_BASH_PRESET_SOURCE, resolvedBash)
+  }
   const webserver = rows.get('webserver')
   if (webserver === undefined) {
     throw new Error(`${BIN_NAME}: desktop profile has no webserver row`)
@@ -1053,6 +1112,7 @@ export function prepareDesktopProfile(
     const pwshSandbox = rows.get(PWSH_SANDBOX_ROW_ID)
     if (pwshSandbox?.name === UPSTREAM_PWSH_SANDBOX_PACKAGE
       && !rowDisabledOnPlatform(pwshSandbox, platform)) {
+      const pwshSandboxConfig = rowConfig(pwshSandbox)
       patches.push(
         {
           id: PWSH_SANDBOX_ROW_ID,
@@ -1065,7 +1125,7 @@ export function prepareDesktopProfile(
               id: DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID,
               name: DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE,
               ...(pwshSandbox.disabled === undefined ? {} : { disabled: pwshSandbox.disabled }),
-              config: rowConfig(pwshSandbox),
+              config: pwshProfile ? { ...pwshSandboxConfig, pwshProfile: true } : pwshSandboxConfig,
             },
           ],
         },
