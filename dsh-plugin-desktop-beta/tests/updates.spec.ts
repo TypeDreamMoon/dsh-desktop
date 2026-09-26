@@ -109,7 +109,10 @@ async function createHarness(options: {
   } as unknown as DesktopRuntime
   const ctx = {
     desktopRuntime: runtime,
-    settings: { get: () => options.desktopSettings ?? {} },
+    settings: {
+      // dsh 0.1.7 serves settings through the describe face keyed by Loader entry id.
+      describe: () => [{ ns: 'desktop-shell', value: options.desktopSettings ?? {} }],
+    },
     webServer: {
       port: 43120,
       register: (registered: WebRoute) => {

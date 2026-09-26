@@ -8,43 +8,38 @@ import { zh } from '../src/client/desktop-settings-locales.ts'
 let root: Root | undefined
 let container: HTMLDivElement | undefined
 
-const PROBED = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-
-function scope(
-  value: unknown,
-  user: unknown = undefined,
-  set = vi.fn(async () => {}),
-  unset = vi.fn(async () => {}),
-) {
-  const snapshot = { status: 'ready', writable: true, value, user }
+/**
+ * One Desktop form snapshot fixture.
+ *
+ * `DesktopSettingsSection` reads the shared `ConfigForm` face, so a fixture only
+ * has to answer `getSnapshot`, `subscribe`, and `set`.
+ */
+function form(value: unknown, user: unknown = undefined) {
+  const snapshot = { status: 'ready', writable: true, value, user, base: undefined, revision: 1, mode: 'host' }
   return {
     getSnapshot: () => snapshot,
     subscribe: () => () => {},
-    set,
-    unset,
+    set: vi.fn(async () => true),
   }
 }
 
-async function mount(
-  platform: 'win32' | 'darwin',
-  shellValue: unknown,
-  shellUser: unknown = undefined,
-) {
+const DESKTOP_VALUE = {
+  mode: 'compatibility',
+  openBrowser: false,
+  networkExposure: 'loopback',
+  macosMaterial: 'off',
+  windowsMaterial: 'off',
+  updateSource: '',
+  updateChannel: '',
+  pwshProfile: false,
+}
+
+async function mount(platform: 'win32' | 'darwin') {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
-  const shell = scope(shellValue, shellUser)
-  const desktop = scope({
-    mode: 'compatibility',
-    openBrowser: false,
-    networkExposure: 'loopback',
-    macosMaterial: 'off',
-    windowsMaterial: 'off',
-    updateSource: '',
-    updateChannel: '',
-    pwshProfile: false,
-  })
+  const desktop = form({ ...DESKTOP_VALUE })
   const props = {
     t: (key: keyof typeof zh) => zh[key],
     api: {
@@ -59,36 +54,24 @@ async function mount(
     },
     platform,
     initialMode: 'compatibility',
-    micaSupported: false,
     setMode: async () => {},
     desktopSettings: desktop,
-    notificationSettings: scope({ enabled: false }),
-    shellSettings: shell,
+    notificationSettings: form({ enabled: false }),
   } as unknown as DesktopSettingsSectionProps
   await act(async () => { root!.render(createElement(DesktopSettingsSection, props)) })
   return {
-    section: container.querySelector('[aria-labelledby="dsh-desktop-shell-title"]') as HTMLElement | null,
-    shell,
+    section: container,
+    shell: container.querySelector('[aria-labelledby="dsh-desktop-shell-title"]') as HTMLElement | null,
+    updates: container.querySelector('[aria-labelledby="dsh-desktop-updates-title"]') as HTMLElement | null,
     desktop,
   }
 }
 
-function submitShell(section: HTMLElement): void {
-  section.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
-}
-
-/**
- * Type into one controlled input.
- *
- * React patches the `value` property setter to track the last rendered value, so
- * assigning through the instance leaves the tracker agreeing and the dispatched
- * event reports no change. Assigning through the prototype setter is what makes
- * the following event look like user input.
- */
-function typeInto(input: HTMLInputElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-  setter.call(input, value)
-  input.dispatchEvent(new Event('input', { bubbles: true }))
+/** Select one option the way a user does, so React's change handler runs. */
+function choose(select: HTMLSelectElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+  setter.call(select, value)
+  select.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
 afterEach(async () => {
@@ -98,50 +81,20 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-describe('Windows shell settings controls', () => {
-  it('renders the probed PowerShell as the effective executable while the override stays empty', async () => {
-    const { section } = await mount('win32', { pwshPath: PROBED })
+describe('Desktop shell and update settings controls', () => {
+  it('offers the PowerShell profile preference on Windows only', async () => {
+    const windows = await mount('win32')
+    expect(windows.shell).not.toBeNull()
+    expect(windows.shell!.textContent).toContain(zh.pwshProfile)
 
-    const input = section!.querySelector<HTMLInputElement>('input')!
-    expect(input.value).toBe('')
-    expect(section!.textContent).toContain(PROBED)
-    expect(section!.textContent).not.toContain(zh.pwshPathAuto)
+    const mac = await mount('darwin')
+    expect(mac.shell).toBeNull()
   })
 
-  it('stays absent on non-Windows hosts', async () => {
-    const { section } = await mount('darwin', { pwshPath: PROBED })
+  it('persists the PowerShell profile preference and requests the governed restart', async () => {
+    const { shell, desktop } = await mount('win32')
 
-    expect(section).toBeNull()
-  })
-
-  it('persists a typed PowerShell executable', async () => {
-    const { section, shell } = await mount('win32', { pwshPath: PROBED })
-    const input = section!.querySelector<HTMLInputElement>('input')!
-
-    await act(async () => {
-      typeInto(input, 'D:\\Program Files\\PowerShell\\7\\pwsh.exe')
-    })
-    await act(async () => { submitShell(section!) })
-
-    expect(shell.set).toHaveBeenCalledWith('pwshPath', 'D:\\Program Files\\PowerShell\\7\\pwsh.exe')
-  })
-
-  it('clears a stored override back to the automatic probe', async () => {
-    const override = 'D:\\tools\\pwsh\\pwsh.exe'
-    const { section, shell } = await mount('win32', { pwshPath: override }, { pwshPath: override })
-
-    expect(section!.querySelector<HTMLInputElement>('input')!.value).toBe(override)
-    const restore = [...section!.querySelectorAll('button')]
-      .find(button => button.textContent === zh.pwshPathAuto)!
-    await act(async () => { restore.click() })
-
-    expect(shell.unset).toHaveBeenCalledWith('pwshPath')
-  })
-
-  it('persists the profile preference and requests the governed restart', async () => {
-    const { section, desktop } = await mount('win32', { pwshPath: PROBED })
-
-    const toggle = section!.querySelector<HTMLButtonElement>('[role="switch"]')!
+    const toggle = shell!.querySelector<HTMLButtonElement>('[role="switch"]')!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => { toggle.click() })
 
@@ -149,13 +102,25 @@ describe('Windows shell settings controls', () => {
     expect(container!.textContent).toContain(zh.restarting)
   })
 
-  it('persists the Git Bash preset preference', async () => {
-    const { section, desktop } = await mount('win32', { pwshPath: PROBED })
+  it('renders the configured update source and channel', async () => {
+    const { updates } = await mount('win32')
 
-    const toggles = section!.querySelectorAll<HTMLButtonElement>('[role="switch"]')
-    await act(async () => { toggles[1]!.click() })
+    const selects = updates!.querySelectorAll<HTMLSelectElement>('select')
+    expect(selects).toHaveLength(2)
+    expect(selects[0]!.value).toBe('')
+    expect(selects[1]!.value).toBe('')
+    expect(updates!.textContent).toContain(zh.updateSource)
+    expect(updates!.textContent).toContain(zh.updateChannel)
+  })
 
-    expect(desktop.set).toHaveBeenCalledWith('gitBashPreset', true)
-    expect(section!.textContent).toContain(zh.gitBashPreset)
+  it('persists a chosen update source and channel', async () => {
+    const { updates, desktop } = await mount('win32')
+
+    const selects = updates!.querySelectorAll<HTMLSelectElement>('select')
+    await act(async () => { choose(selects[0]!, 'fork') })
+    expect(desktop.set).toHaveBeenCalledWith('updateSource', 'fork')
+
+    await act(async () => { choose(selects[1]!, 'beta') })
+    expect(desktop.set).toHaveBeenCalledWith('updateChannel', 'beta')
   })
 })

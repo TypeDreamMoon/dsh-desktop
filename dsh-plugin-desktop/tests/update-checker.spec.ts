@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   DESKTOP_CURRENT_VERSION_HEADER,
+  DESKTOP_RELEASE_CHANNEL_HEADER,
   DESKTOP_VERSION_ENDPOINT,
   GITHUB_API_ACCEPT,
   GITHUB_API_VERSION,
   MAX_GITHUB_RELEASES_RESPONSE_BYTES,
   MAX_VERSION_RESPONSE_BYTES,
-  checkForDesktopUpdate,
   checkForStableUpdate,
+  checkForDesktopUpdate,
   compareSemVerVersions,
   desktopVersionRequestHeaders,
   githubReleasesEndpoint,
@@ -24,6 +25,10 @@ const INSTALLATION_ID = assertDesktopInstallationId('01234567-89ab-4cde-8f01-234
 
 function versionResponse(version: unknown, init: ResponseInit = {}): Response {
   return Response.json({ version }, init)
+}
+
+function channelVersionResponse(version: unknown, channel: 'stable' | 'beta'): Response {
+  return Response.json({ version, channel })
 }
 
 describe('strict SemVer parsing', () => {
@@ -66,6 +71,49 @@ describe('strict SemVer parsing', () => {
 })
 
 describe('public Desktop version check', () => {
+  it('isolates Beta checks and rejects an unlabelled or stable response', async () => {
+    const calls: RequestInit[] = []
+    const request = vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push(init)
+      return channelVersionResponse('2.0.5-beta.3', 'beta')
+    })
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.5-beta.2',
+      channel: 'beta',
+      request,
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.0.5-beta.2',
+      latestVersion: '2.0.5-beta.3',
+    })
+    expect(new Headers(calls[0]?.headers).get(DESKTOP_RELEASE_CHANNEL_HEADER)).toBe('beta')
+
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.5-beta.2',
+      channel: 'beta',
+      request: async () => versionResponse('2.0.5-beta.3'),
+    })).resolves.toBeNull()
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.5-beta.2',
+      channel: 'beta',
+      request: async () => channelVersionResponse('2.0.5', 'stable'),
+    })).resolves.toBeNull()
+  })
+
+  it('allows an explicit Beta-to-stable selection even when stable is older', async () => {
+    await expect(checkForDesktopUpdate({
+      currentVersion: '2.0.5-beta.2',
+      channel: 'stable',
+      currentChannel: 'beta',
+      allowDowngrade: true,
+      request: async () => channelVersionResponse('2.0.4', 'stable'),
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.0.5-beta.2',
+      latestVersion: '2.0.4',
+    })
+  })
+
   it('uses only the fixed no-cache version endpoint and reports a newer stable version', async () => {
     const controller = new AbortController()
     const calls: Array<{ url: string, init: RequestInit }> = []
@@ -112,8 +160,16 @@ describe('public Desktop version check', () => {
       [DESKTOP_CURRENT_VERSION_HEADER]: '2.9.9',
       [DESKTOP_INSTALLATION_ID_HEADER]: INSTALLATION_ID,
     })
+    expect(() => desktopVersionRequestHeaders(INSTALLATION_ID, '2.0.5-beta.2'))
+      .toThrow('canonical stable SemVer')
+    expect(desktopVersionRequestHeaders(INSTALLATION_ID, '2.0.5-beta.2', 'beta')).toEqual({
+      Accept: 'application/json',
+      [DESKTOP_RELEASE_CHANNEL_HEADER]: 'beta',
+      [DESKTOP_CURRENT_VERSION_HEADER]: '2.0.5-beta.2',
+      [DESKTOP_INSTALLATION_ID_HEADER]: INSTALLATION_ID,
+    })
     expect(desktopVersionRequestHeaders()).toEqual({ Accept: 'application/json' })
-    expect(() => desktopVersionRequestHeaders(undefined, '2.9.0-rc.1')).toThrow('canonical stable SemVer')
+    expect(() => desktopVersionRequestHeaders(undefined, 'v2.9.0')).toThrow('canonical stable SemVer')
     expect(() => desktopVersionRequestHeaders('not-a-uuid')).toThrow('canonical lowercase UUID v4')
   })
 
@@ -147,6 +203,19 @@ describe('public Desktop version check', () => {
       currentVersion: '9007199254740992.0.0',
       request: async () => versionResponse('10000000000000000.0.0'),
     })).resolves.toMatchObject({ status: 'update-available' })
+  })
+
+  it('lets a Beta installation discover the corresponding stable release', async () => {
+    await expect(checkForStableUpdate({
+      currentVersion: '2.0.5-beta.2',
+      currentChannel: 'beta',
+      allowDowngrade: true,
+      request: async () => versionResponse('2.0.5'),
+    })).resolves.toEqual({
+      status: 'update-available',
+      currentVersion: '2.0.5-beta.2',
+      latestVersion: '2.0.5',
+    })
   })
 
   it.each([
@@ -206,7 +275,7 @@ describe('public Desktop version check', () => {
     })).resolves.toBeNull()
   })
 
-  it.each(['2.0', 'v2.0.0', '2.0.0-rc.1'])('skips invalid installed version %s before requesting', async currentVersion => {
+  it.each(['2.0', 'v2.0.0', '2.0.0-01'])('skips invalid installed version %s before requesting', async currentVersion => {
     const request = vi.fn(async () => versionResponse('2.1.0'))
 
     await expect(checkForStableUpdate({ currentVersion, request })).resolves.toBeNull()
@@ -351,3 +420,14 @@ describe('GitHub release source', () => {
     })).resolves.toBeNull()
   })
 })
+
+describe('Next release isolation', () => {
+  it.each(['2.0.14-next', '2.0.14-next.1'])('accepts installed %s and preserves its version header', async currentVersion => {
+    const request = vi.fn<UpdateRequest>(async () => Response.json({ version: '2.0.15-next.1', channel: 'next' }));
+    expect(await checkForDesktopUpdate({ currentVersion, channel: 'next', request })).toMatchObject({ status: 'update-available' });
+    expect(new Headers(request.mock.calls[0]?.[1]?.headers).get(DESKTOP_CURRENT_VERSION_HEADER)).toBe(currentVersion);
+  });
+  it.each([{version:'2.0.15',channel:'stable'}, {version:'2.0.15-beta.1',channel:'next'}, {version:'2.0.15-next.1'}, {version:'2.0.15-next.01',channel:'next'}])('rejects a wrong or ambiguous Next release %j', async body => {
+    expect(await checkForDesktopUpdate({ currentVersion:'2.0.14-next', channel:'next', request:async()=>Response.json(body) })).toBeNull();
+  });
+});

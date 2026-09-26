@@ -256,6 +256,7 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       const confirmedVersion = confirmedResult?.status === 'update-available'
         ? confirmedResult.latestVersion
         : undefined
+      const confirmedDigests = confirmedResult?.installerSha256
       if (channel === (this.options.adapter.releaseChannel ?? 'stable')) this.observeResult(confirmedResult)
       if (confirmedVersion !== version || this.disposed) return
 
@@ -264,13 +265,16 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       this.downloadingVersion = version
       this.registration.refresh()
       try {
+        // Omitted digests must not surface as trailing undefined arguments: the
+        // spec pins the exact call shape.
+        const digestArguments = confirmedDigests === undefined ? [] : [confirmedDigests] as const
         if (this.options.adapter.releaseChannel === undefined && channel === 'stable') {
           await this.options.adapter.downloadAndOpen(
-            version, controller.signal, undefined, this.options.policy.source,
+            version, controller.signal, undefined, ...digestArguments, this.options.policy.source,
           )
         } else {
           await this.options.adapter.downloadAndOpen(
-            version, controller.signal, channel, this.options.policy.source,
+            version, controller.signal, channel, ...digestArguments, this.options.policy.source,
           )
         }
       } catch {

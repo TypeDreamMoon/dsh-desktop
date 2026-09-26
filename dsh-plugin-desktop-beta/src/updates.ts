@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-settings'
 import { DESKTOP_UPDATE_CHECK_PATH } from './desktop-settings-contract.ts'
 import { handleDesktopUpdateCheckRequest } from './desktop-settings-route.ts'
 import type {} from './runtime.ts'
@@ -11,6 +12,7 @@ import { startDesktopUpdateLifecycle } from './update-lifecycle.ts'
 import { parseDesktopUpdateChannel } from './update-channel.ts'
 import type { DesktopReleaseChannel } from './update-checker.ts'
 import { parseDesktopUpdateSource, type DesktopUpdateSource } from './update-source.ts'
+import { DESKTOP_SETTINGS_ENTRY_ID } from './settings-bridge.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'desktop-updates'
@@ -20,10 +22,7 @@ export const inject = ['desktopRuntime', 'webServer', 'connection', 'settings']
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
-/** Settings namespace carrying Desktop-wide preferences. */
-const DESKTOP_SETTINGS_NAMESPACE = 'dsh-desktop'
-
-/** Subset of the Desktop settings namespace this plugin consumes. */
+/** Subset of the Desktop shell settings this plugin consumes. */
 interface DesktopUpdateSettings {
   readonly updateSource?: string
   readonly updateChannel?: string
@@ -34,13 +33,19 @@ function settingsOverride(value: string | undefined, fallback: string): string {
   return value !== undefined && value.trim() !== '' ? value : fallback
 }
 
-/** Read the Desktop settings namespace; undefined before it registers. */
+/**
+ * Read the Desktop shell entry's live configuration.
+ *
+ * dsh 0.1.7 addresses a settings document by its Loader entry id and serves it
+ * through the `settings` form service, so the Desktop preferences are read from
+ * the describe face rather than by a registered namespace.
+ * @param ctx - Host context carrying the settings service.
+ * @returns the update-relevant preferences, or undefined before the entry is served.
+ */
 function readDesktopUpdateSettings(ctx: Context): DesktopUpdateSettings | undefined {
-  try {
-    return ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopUpdateSettings | undefined
-  } catch {
-    return undefined
-  }
+  const entry = ctx.settings.describe()
+    .find(candidate => String(candidate.ns) === DESKTOP_SETTINGS_ENTRY_ID)
+  return entry?.value as DesktopUpdateSettings | undefined
 }
 
 function resolveUpdateSource(value: string, fallback: string): DesktopUpdateSource {

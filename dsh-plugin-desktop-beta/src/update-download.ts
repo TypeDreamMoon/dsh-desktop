@@ -1,16 +1,18 @@
 /** Headless, confirmation-gated downloads for DSH Desktop installers. */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmod, lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import {
   compareSemVerVersions,
   DESKTOP_RELEASE_CHANNEL_HEADER,
+  parseCanonicalChannelVersion,
   parseSemVer,
   resolveGithubDesktopRelease,
   type DesktopReleaseChannel,
   type GithubReleaseAsset,
+  type GithubReleaseQuery,
 } from './update-checker.ts'
 import { OFFICIAL_UPDATE_SOURCE, type DesktopUpdateSource } from './update-source.ts'
 
@@ -38,10 +40,23 @@ export type UpdateDownloadErrorCode =
   | 'invalid-artifact'
   | 'invalid-options'
   | 'network'
+  | 'redirect-origin'
   | 'response-too-large'
 
-/** Fetch-compatible request boundary supplied by the Electron adapter or a test. */
-export type UpdateArtifactRequest = (url: string, init: RequestInit) => Promise<Response>
+/**
+ * One settled download response plus the URL the redirect chain landed on.
+ * Electron `net.fetch` cannot fill `Response.url` (a documented limitation:
+ * the value is always empty), so the transport adapter follows redirects
+ * itself and reports the settled URL here for the HTTPS check.
+ */
+export interface UpdateArtifactResponse {
+  readonly response: Response
+  /** Absolute URL the transport settled on after following redirects. */
+  readonly finalUrl: string
+}
+
+/** Request boundary supplied by the Electron adapter or a test. */
+export type UpdateArtifactRequest = (url: string, init: RequestInit) => Promise<UpdateArtifactResponse>
 
 /** Inputs for one user-confirmed installer download. */
 export interface DownloadDesktopUpdateOptions {
@@ -55,10 +70,18 @@ export interface DownloadDesktopUpdateOptions {
   readonly source?: DesktopUpdateSource
   /** Absolute installer path selected by the user. */
   readonly destinationPath: string
-  /** Request implementation, normally backed by Electron `net.fetch`. */
+  /** Redirect-following request adapter, normally backed by Electron `net.request`. */
   readonly request: UpdateArtifactRequest
   /** Optional cancellation signal owned by the update coordinator. */
   readonly signal?: AbortSignal
+  /**
+   * Hex SHA-256 the downloaded installer must match. Passing this turns the
+   * digest check into a hard gate in front of execution; it is optional only
+   * because the version endpoint does not publish digests yet.
+   */
+  readonly expectedSha256?: string
+  /** Progress after each bounded chunk; omitted by existing Desktop callers. */
+  readonly onProgress?: (received: number, total: number | undefined) => void
 }
 
 /** Typed failure from installer request, validation, or cancellation. */
@@ -122,6 +145,7 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   const channel = options.channel ?? 'stable'
   validatedVersion(options.version, channel)
   const destinationPath = validatedArtifactPath(options.destinationPath, platform)
+  const expectedSha256 = normalizedExpectedDigest(options.expectedSha256)
   const paths = await prepareDownloadPaths(destinationPath)
   throwIfAborted(options.signal)
 
@@ -154,20 +178,24 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   }
 
   let response: Response
+  let finalUrl: string
   try {
-    response = await options.request(requestUrl, {
+    const settled = await options.request(requestUrl, {
       method: 'GET',
       headers: requestHeaders,
       cache: 'no-store',
       redirect: 'follow',
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
+    response = settled.response
+    finalUrl = settled.finalUrl
   } catch (cause) {
     if (options.signal?.aborted === true || isAbortFailure(cause)) throw aborted(cause)
     throw new UpdateDownloadError('network', 'The update installer could not be downloaded.', { cause })
   }
 
   if (response.status !== 200) {
+    await discardResponseBody(response)
     throw new UpdateDownloadError(
       'http-status',
       `The update download service returned HTTP ${String(response.status)}.`,
@@ -177,13 +205,25 @@ export async function downloadDesktopUpdate(options: DownloadDesktopUpdateOption
   if (response.body === null) {
     throw new UpdateDownloadError('empty-body', 'The update download service returned an empty body.')
   }
-  assertDeclaredSize(response)
+  try {
+    assertSecureDownloadUrl(finalUrl)
+    assertDeclaredSize(response)
+  } catch (cause) {
+    await discardResponseBody(response)
+    throw cause
+  }
 
   let failure: unknown
   try {
-    await writeResponseBody(paths.temporary, response.body, options.signal)
+    const declared = Number(response.headers.get('content-length'))
+    await writeResponseBody(paths.temporary, response.body, options.signal, received => {
+      options.onProgress?.(received, Number.isFinite(declared) && declared > 0 ? declared : undefined)
+    })
     throwIfAborted(options.signal)
     await validateArtifact(paths.temporary, platform)
+    if (expectedSha256 !== undefined) {
+      await assertInstallerDigest(paths.temporary, expectedSha256)
+    }
     throwIfAborted(options.signal)
     await unlinkIfPresent(paths.completed)
     await rename(paths.temporary, paths.completed)
@@ -210,11 +250,16 @@ async function resolveGithubUpdateAsset(options: {
   readonly request: UpdateArtifactRequest
   readonly signal?: AbortSignal
 }): Promise<GithubReleaseAsset | null> {
+  // The release listing reads a plain `Response`; the artifact transport wraps
+  // one together with the URL its redirect chain settled on, and only the
+  // installer download itself needs that settled URL.
+  const request: GithubReleaseQuery['request'] =
+    async (url, init) => (await options.request(url, init)).response
   const release = await resolveGithubDesktopRelease({
     repository: options.source.repository,
     channel: options.channel,
     version: options.version,
-    request: options.request,
+    request,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   })
   if (release === null) return null
@@ -257,7 +302,7 @@ export function desktopUpdateFilename(
   validatedVersion(version, channel)
   const extension = platform === 'darwin' ? 'dmg' : 'exe'
   const platformName = platform === 'darwin' ? 'mac' : 'windows'
-  const product = channel === 'beta' ? 'DSH-Desktop-Beta' : 'DSH-Desktop'
+  const product = channel === 'next' ? 'DSH-NEXT' : channel === 'beta' ? 'DSH-Desktop-Beta' : 'DSH-Desktop'
   return `${product}-${version}-${platformName}.${extension}`
 }
 
@@ -335,13 +380,7 @@ function validatedPlatform(platform: DesktopDownloadPlatform): DesktopDownloadPl
 }
 
 function validatedVersion(version: string, channel: DesktopReleaseChannel = 'stable'): string {
-  const parsed = parseSemVer(version)
-  const expectedPrerelease = channel === 'stable'
-    ? parsed?.prerelease.length === 0
-    : parsed?.prerelease.length === 2
-      && parsed.prerelease[0] === 'beta'
-      && /^[0-9]+$/u.test(parsed.prerelease[1]!)
-  if (parsed === null || !expectedPrerelease || parsed.version !== version) {
+  if (parseCanonicalChannelVersion(version, channel) === null) {
     throw new UpdateDownloadError('invalid-options', `The update version must match the ${channel} channel.`)
   }
   return version
@@ -353,7 +392,8 @@ function validatedReleaseVersion(version: string): string {
   const isBeta = parsed?.prerelease.length === 2
     && parsed.prerelease[0] === 'beta'
     && /^[0-9]+$/u.test(parsed.prerelease[1]!)
-  if (parsed === null || parsed.version !== version || (!isStable && !isBeta)) {
+  const isNext = parseCanonicalChannelVersion(version, 'next') !== null
+  if (parsed === null || parsed.version !== version || (!isStable && !isBeta && !isNext)) {
     throw new UpdateDownloadError('invalid-options', 'The update version must belong to a supported release channel.')
   }
   return version
@@ -473,6 +513,11 @@ async function lstatOptional(filename: string): Promise<Awaited<ReturnType<typeo
   }
 }
 
+/** Release a rejected response body so its connection does not linger until GC. */
+async function discardResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined)
+}
+
 function assertDeclaredSize(response: Response): void {
   const declared = response.headers.get('content-length')
   if (declared === null || !DECIMAL_BYTES.test(declared)) return
@@ -484,10 +529,65 @@ function assertDeclaredSize(response: Response): void {
   }
 }
 
+/** Require a usable HTTPS URL even when an update channel permits external artifact hosts. */
+export function assertSecureDownloadUrl(finalUrl: string): URL {
+  let parsed: URL
+  try {
+    parsed = new URL(finalUrl)
+  } catch {
+    throw new UpdateDownloadError('redirect-origin', 'The update download transport reported no usable final URL.')
+  }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port && parsed.port !== '443') {
+    throw new UpdateDownloadError('redirect-origin', 'The update download must settle on HTTPS.')
+  }
+  return parsed
+}
+
+/** Normalize the optional expected digest at option validation time, before any network work. */
+function normalizedExpectedDigest(expected: string | undefined): string | undefined {
+  if (expected === undefined) return undefined
+  const normalized = expected.trim().toLowerCase()
+  if (!/^[0-9a-f]{64}$/u.test(normalized)) {
+    throw new UpdateDownloadError('invalid-options', 'The expected installer digest is not a hex SHA-256.')
+  }
+  return normalized
+}
+
+/**
+ * Verify the downloaded installer against the published digest. The file is
+ * hashed in bounded chunks — installers reach hundreds of megabytes, and a
+ * single whole-file buffer would spike main-process memory — and compared in
+ * constant time over the decoded bytes.
+ */
+async function assertInstallerDigest(filename: string, expected: string): Promise<void> {
+  const expectedBytes = Buffer.from(expected, 'hex')
+  const hash = createHash('sha256')
+  const handle = await open(filename, 'r')
+  try {
+    const chunk = Buffer.alloc(1024 * 1024)
+    while (true) {
+      const result = await handle.read(chunk, 0, chunk.byteLength, null)
+      if (result.bytesRead === 0) break
+      hash.update(result.bytesRead === chunk.byteLength ? chunk : chunk.subarray(0, result.bytesRead))
+    }
+  } finally {
+    await handle.close()
+  }
+  const actualBytes = hash.digest()
+  if (actualBytes.byteLength !== expectedBytes.byteLength
+    || !timingSafeEqual(actualBytes, expectedBytes)) {
+    throw new UpdateDownloadError(
+      'invalid-artifact',
+      'The update installer does not match the published digest.',
+    )
+  }
+}
+
 async function writeResponseBody(
   filename: string,
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
+  onProgress?: (received: number) => void,
 ): Promise<void> {
   const handle = await open(filename, 'wx', PRIVATE_FILE_MODE)
   const reader = body.getReader()
@@ -506,6 +606,7 @@ async function writeResponseBody(
       }
       await writeAll(handle, chunk.value)
       bytesWritten += chunk.value.byteLength
+      onProgress?.(bytesWritten)
     }
     if (bytesWritten === 0) {
       throw new UpdateDownloadError('empty-body', 'The update download service returned an empty body.')
