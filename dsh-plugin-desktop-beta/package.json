@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-desktop-beta",
-  "version": "2.0.15-beta.1",
+  "version": "2.0.16-beta.1",
   "description": "DSH Desktop Beta: an Electron shell composed as a DeepSeek Harness Cordis plugin",
   "desktopName": "dsh-desktop-beta.desktop",
   "license": "MIT",
@@ -309,7 +309,7 @@
     "@deepseek-ai/schemastery": "^3.18.4",
     "adm-zip": "^0.6.0",
     "dsh-community-market": "0.1.0-dev.0",
-    "dshmarket": "1.66.0",
+    "dshmarket": "1.66.1",
     "fs-ext": "2.1.1",
     "koffi": "3.1.5",
     "node-addon-require-builtin": "^0.1.6",
