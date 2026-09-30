@@ -15,7 +15,7 @@ async function fixture(overrides: Partial<NextUpdateOptions> = {}) {
   const home = await mkdtemp(join(tmpdir(), 'next-updates-test-')); roots.push(home)
   const artifact = Buffer.alloc(1024); artifact.write('koly', 512)
   const request = vi.fn<UpdateRequest>(async url => url.includes('/version')
-    ? Response.json({ version: '2.0.15-next.1', channel: 'next' }) : new Response(artifact, { headers: { 'content-length': '1024' } }))
+    ? Response.json({ version: '2.0.17-next.1', channel: 'next' }) : new Response(artifact, { headers: { 'content-length': '1024' } }))
   const options: NextUpdateOptions = { userData: home, version: '2.0.14-next', platform: 'darwin', packaged: true,
     request, prepare: vi.fn(async path => { expect(await readFile(path)).toEqual(artifact) }), install: vi.fn(async () => {}),
     changed: vi.fn(), log: vi.fn(), ...overrides }
@@ -37,7 +37,7 @@ it('checks without downloading; download completion waits for an explicit instal
   expect(updates.snapshot().phase).toBe('installing')
 })
 it('does not confuse an unpublished channel, invalid response or network failure with up to date', async () => {
-  for (const response of [new Response('', { status: 400 }), new Response('', { status: 503 }), Response.json({ version: '2.0.15', channel: 'stable' })]) {
+  for (const response of [new Response('', { status: 400 }), new Response('', { status: 503 }), Response.json({ version: '2.0.17', channel: 'stable' })]) {
     const { updates } = await fixture({ request: async () => response })
     await updates.check()
     expect(updates.snapshot()).toMatchObject({ phase: 'error', error: 'service' })
@@ -90,7 +90,7 @@ it('downloads a Next installer that settles on an external HTTPS CDN', async () 
   const cdn = 'https://cdn-lfs-cn-1.modelscope.cn/prod/lfs-objects/next.dmg'
   const artifact = Buffer.alloc(1024); artifact.write('koly', 512)
   const request = vi.fn<UpdateRequest>(async url => url.includes('/version')
-    ? Response.json({ version: '2.0.15-next.1', channel: 'next' })
+    ? Response.json({ version: '2.0.17-next.1', channel: 'next' })
     : url.includes('/api/downloads/')
       ? new Response(null, { status: 302, headers: { location: cdn } })
       : new Response(artifact))
@@ -103,10 +103,10 @@ it('downloads a Next installer that settles on an external HTTPS CDN', async () 
 it('serves only the private archive to the native updater and closes its loopback listener', async () => {
   const root = await mkdtemp(join(tmpdir(), 'next-feed-test-')); roots.push(root)
   const path = join(root, 'update.zip'); await writeFile(path, 'test archive')
-  const feed = await serveMacUpdate(path, '2.0.15-next.1')
+  const feed = await serveMacUpdate(path, '2.0.17-next.1')
   try {
     const metadata = await (await fetch(feed.url)).json() as { url: string; name: string }
-    expect(metadata.name).toBe('2.0.15-next.1')
+    expect(metadata.name).toBe('2.0.17-next.1')
     expect(await (await fetch(metadata.url)).text()).toBe('test archive')
     expect((await fetch(new URL('/update.zip', feed.url))).status).toBe(404)
     expect((await fetch(feed.url, { method: 'POST' })).status).toBe(404)

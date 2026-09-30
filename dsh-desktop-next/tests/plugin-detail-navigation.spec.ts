@@ -2,6 +2,13 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import { expect, it, vi } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import { registerPluginControls } from '../src/client/plugin-controls.tsx'
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  Button: 'button', PluginArtworkDefault: 'svg', Switch: 'input', StateDot: 'span',
+  Toast: 'aside', Modal: 'dialog', IconSettingsOutlineRegular: 'svg',
+}))
 
 type Node = { type: string | ((props: any) => Node); props: Record<string, any> }
 const jsx = (type: Node['type'], props: Node['props']): Node => ({ type, props })
@@ -47,6 +54,7 @@ function fixture() {
   apply!({ effect: (effect: () => void) => effect(), on: noop,
     locale: { register: noop, bind: () => (key: string) => key }, remote: { $on: noop },
     layout: { panelInfo: { subscribe: noop }, selectPanel: vi.fn() }, reflect: { provide: noop },
+    configForms: { describe: () => ({ getSnapshot: () => ({}), subscribe: noop }), get: () => undefined },
     slots: { inject: (_name: string, register: () => unknown) => {
       const result = register()
       if (result && typeof result === 'object' && Symbol.iterator in result) [...result as Iterable<unknown>]
@@ -148,6 +156,48 @@ it('places keyed bundle actions before the native switch without sharing the car
   const openButton = nodes(rendered).find(node => node.props.onClick === head.props.onOpen)!
   expect(openButton).toBeDefined()
   expect(nodes(openButton).some(node => node.props.name === 'plugins.bundle.actions')).toBe(false)
+})
+
+it('keeps Automation tasks in the official group with its artwork, badge, native switches and component details under Next composition', () => {
+  const app = fixture()
+  const ctx = {
+    inject: (_services: unknown, callback: (context: unknown) => void) => { callback(ctx) },
+    slots: {
+      inject: (_name: string, callback: () => unknown) => { callback() },
+      register: (options: { name: string; key?: string }) => {
+        if (options.name === 'plugins.bundle.hidden') app.ledger.hiddenBundles.add(options.key!)
+        return () => {}
+      },
+    },
+  }
+  registerPluginControls(ctx as unknown as Context)
+  const name = '@deepseek-ai/dsh-experimental-schedule-bundle'
+  const { meta } = JSON.parse(readFileSync(createRequire(import.meta.url).resolve(`${name}/locale/zh.json`), 'utf8'))
+  const schedule = { ...app.remote, name, enabled: false, meta: { ...meta, icon: '/schedule/icon.svg' },
+    rows: [{ rowId: 'schedule', moduleName: '@deepseek-ai/dsh-schedule', entryId: 'include:schedule', enabled: false, phase: 'disabled' }] }
+  app.state.packages.push(schedule)
+  const findCard = () => nodes(app.page()).find(node => typeof node.type === 'function' && node.type.name === 'PackageCard' && node.props.pkg.name === name)!
+  const card = findCard()
+  expect(card).toBeDefined()
+  expect(nodes(app.page()).find(node => node.props['data-plugin-count'])?.props['data-plugin-count']).toBe(2)
+  const head = component(render(card), 'CardHead')!
+  expect(head.props.title).toBe('自动化任务')
+  expect(head.props.description).toBe(meta.description)
+  expect(head.props.icon.props.src).toBe('/schedule/icon.svg')
+  expect(nodes(head.props.tags).some(node => node.props.children === 'statusBeta')).toBe(true)
+  const toggle = render(component(head.props.end, 'EnableSwitch')!)
+  expect(toggle.props.checked).toBe(false)
+  toggle.props.onChange(true)
+  expect(app.setEnabled).toHaveBeenCalledExactlyOnceWith(name, true)
+  schedule.enabled = true
+  const activeHead = component(render(findCard()), 'CardHead')!
+  expect(render(component(activeHead.props.end, 'EnableSwitch')!).props.checked).toBe(true)
+  card.props.onOpen()
+  const detail = render(component(app.page(), 'PackageDetail')!)
+  expect(component(detail, 'RowsSection')?.props.rows).toEqual(schedule.rows)
+  const top = component(detail, 'DetailTop')!
+  render(component(top.props.actions, 'EnableSwitch')!).props.onChange(false)
+  expect(app.setEnabled).toHaveBeenLastCalledWith(name, false)
 })
 
 

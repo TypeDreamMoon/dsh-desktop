@@ -7,6 +7,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, net, Notification, protocol, safeStorage, session, shell, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron'
 import { appRequestHeaders, forwardWebRequest, serveWebDocument } from './web-document.ts'
+import { installAppDownloads } from './app-downloads.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { NEXT_PACKAGE, parseFeatures, profileName } from './profiles.ts'
 import { APP_URL, IPC, SHELL_URL } from './ipc.ts'
@@ -24,9 +25,10 @@ import { desktopTerminalStateDirectory, openDesktopTerminal } from './desktop-te
 import { bundledPnpmEntry, createPackageRunner } from './extensions.ts'
 import { applyDesktopPackageAgePolicy } from './pnpm-policy.ts'
 import { auxiliaryWindowChromeOptions, auxiliaryWindowHasCustomFrame } from '../../dsh-plugin-desktop-beta/src/auxiliary-window-options.ts'
+import { cleanupDisposableTree } from '../../dsh-plugin-desktop-beta/src/disposable-tree.ts'
 import { atomicJson, privateDirectory } from './private-files.ts'
 import { windowMaterial } from './window-material.ts'
-import { ONBOARDING_ARGUMENT, RECOVERY_ARGUMENT, SAFE_ARGUMENT, relaunchArguments } from './relaunch.ts'
+import { ONBOARDING_ARGUMENT, RECOVERY_ARGUMENT, SAFE_ARGUMENT, relaunchApp, relaunchArguments } from './relaunch.ts'
 import { createNativePermissions, installMediaPermissions } from './electron-permissions.ts'
 import { defaultDataDirectory, readDataDirectory, validateDataDirectory } from './data-directory.ts'
 import { maskSecrets } from './mask-secrets.ts'
@@ -48,11 +50,28 @@ const locationRoot = process.env.DSH_DESKTOP_NEXT_HOME ? defaultHome
 const locationFile = join(locationRoot, 'desktop-next-location.json')
 const dataLocation = readDataDirectory(defaultHome, locationRoot)
 const home = dataLocation.home
-const nativeLocale = new NativeLocaleStore(home)
-const electronData = join(home, 'electron-user-data')
-privateDirectory(electronData)
+const normalElectronData = join(home, 'electron-user-data')
+privateDirectory(normalElectronData)
 app.setName('DSH NEXT')
+// Keep one application owner across normal and safe launches, before switching
+// Chromium storage to the disposable environment.
+app.setPath('userData', normalElectronData)
+const ownsInstance = claimDesktopSingleInstance(app, openMain)
+const safeModeRequested = process.argv.includes(SAFE_ARGUMENT)
+const safeElectronData = join(normalElectronData, 'safe-mode')
+if (ownsInstance) {
+  if (safeModeRequested) {
+    cleanupDisposableTree(safeElectronData)
+    privateDirectory(safeElectronData)
+  } else {
+    try { cleanupDisposableTree(safeElectronData) }
+    catch (error) { console.error('Next Safe Mode state cleanup failed', error) }
+  }
+}
+const electronData = ownsInstance && safeModeRequested ? safeElectronData : normalElectronData
+const nativeLocale = new NativeLocaleStore(safeModeRequested ? electronData : home)
 app.setPath('userData', electronData)
+app.setPath('sessionData', electronData)
 protocol.registerSchemesAsPrivileged([{ scheme: 'dsh-app', privileges: {
   standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true,
 } }])
@@ -66,7 +85,8 @@ let recoveryRunner: ReturnType<typeof createPackageRunner> | undefined
 let replacingWindow = false
 let diagnosticsFile: string | undefined
 let recoveryNotice: NonNullable<DesktopState['recovery']>['notice']
-let recoveryStopping: Promise<void> = Promise.resolve()
+let recoveryStopping: Promise<void> | undefined
+let recoveryRequest: Promise<void> | undefined
 let pendingSettings: DesktopSettingsPage | undefined
 let quitting = false
 let onboarding = false
@@ -75,7 +95,6 @@ let onboardingComputerUse = false
 let relaunch: string[] | undefined
 let installingUpdate = false
 let systemProxy: DesktopSystemProxyProbe = {}
-let ownsInstance = false
 let windowsLanguage = 'en'
 const require = createRequire(NEXT_PACKAGE)
 const webRoot = dirname(require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html'))
@@ -83,6 +102,7 @@ const version = (JSON.parse(readFileSync(NEXT_PACKAGE, 'utf8')) as { version: st
 const t = (zh: string, en: string): string => windowsLanguage.toLowerCase().startsWith('zh') ? zh : en
 const runtime = new NextDesktopRuntime({
   home, root, executable: process.execPath, addresses: () => [...desktopLanAddresses()], systemProxy: () => systemProxy,
+  ...(safeModeRequested ? { stateHome: electronData } : {}),
   certificate: async addresses => {
     try {
       return await createLanHttpsCertificate(electronData, addresses, {
@@ -251,8 +271,11 @@ function openControls(page: 'general' | 'profiles' | 'create-profile' | 'tools' 
     mainWindow = undefined
     replacingWindow = true
     try { previousMain?.destroy() } finally { replacingWindow = false }
-    recoveryStopping = runtime.backend.stop()
-    void recoveryStopping.catch(error => runtime.diagnostics.append(String(error), 'error'))
+    const stopping = runtime.backend.stop().finally(() => {
+      if (recoveryStopping === stopping) recoveryStopping = undefined
+    })
+    recoveryStopping = stopping
+    void stopping.catch(error => runtime.diagnostics.append(String(error), 'error'))
     native.refresh()
   }
   const locale = nativeLocale.resolve(runtime.selected, windowsLanguage)
@@ -363,6 +386,20 @@ async function command(value: unknown, source: 'app' | 'shell' | 'native' = 'app
   const input = value as Record<string, unknown>
   const type = input.type
   if (typeof type !== 'string') throw new Error('Invalid Next command')
+  // Match Stable's restartRequest lifetime: share an in-flight request and
+  // release it after success, cancellation or failure so recovery can retry.
+  if (['safe-mode', 'normal-mode', 'recover', 'restart', 'rollback', 'repair-global', 'restart-app', 'restart-recovery'].includes(type)) {
+    if (recoveryRequest !== undefined) return recoveryRequest
+    const request = performCommand(input, type, source).finally(() => {
+      if (recoveryRequest === request) recoveryRequest = undefined
+    })
+    recoveryRequest = request
+    return request
+  }
+  return performCommand(input, type, source)
+}
+
+async function performCommand(input: Record<string, unknown>, type: string, source: 'app' | 'shell' | 'native'): Promise<void> {
   if (type === 'controls') {
     if (input.page !== undefined && (typeof input.page !== 'string' || !['general', 'profiles', 'create-profile', 'tools', 'recovery', 'permissions'].includes(input.page))) throw new Error('Invalid controls page')
     openControls(input.page as Parameters<typeof openControls>[0]); return
@@ -472,6 +509,7 @@ async function command(value: unknown, source: 'app' | 'shell' | 'native' = 'app
       return
     }
     if (type === 'preferences') {
+      if (runtime.safeMode) throw new Error(t('安全模式使用固定的桌面设置。', 'Safe Mode uses fixed desktop settings.'))
       const preferences = parsePreferences(input.preferences)
       if (portsChanged(runtime.preferences, preferences)) {
         if (!await confirmed(t('应用访问设置并重启 Host？', 'Apply access settings and restart the Host?'), preferences.browserAccess && preferences.networkExposure === 'lan'
@@ -510,17 +548,33 @@ async function command(value: unknown, source: 'app' | 'shell' | 'native' = 'app
       app.quit()
       return
     }
+    if (type === 'safe-mode' || type === 'normal-mode') {
+      // Like Beta, mode changes cross an application relaunch boundary. The
+      // existing quit owner hides windows and confirms Host exit before relaunch.
+      if (type === 'safe-mode' && runtime.safeMode) return
+      await recoveryStopping
+      await runtime.backend.stop()
+      relaunch = relaunchArguments(process.argv.slice(1), false, type === 'safe-mode')
+      app.quit()
+      return
+    }
     // Recovery actions can always bypass first-run setup to repair or inspect a Profile.
     onboarding = false
     await recoveryStopping
-    await runtime.restart(async () => {
+    const change = async (): Promise<void> => {
       if (type === 'recover') await runtime.profiles.recover(next)
       if (type === 'rollback') await restoreCheckpoint()
       if (type === 'repair-global') runtime.recovery.repairGlobalPatch()
       if (features) runtime.profiles.setFeatures(next, features)
-      if (type === 'safe-mode') runtime.safeMode = true
-      else if (type !== 'restart') runtime.safeMode = false
-    })
+    }
+    if (runtime.safeMode) {
+      await runtime.backend.stop()
+      await change()
+      relaunch = relaunchArguments(process.argv.slice(1), false, type === 'restart')
+      app.quit()
+      return
+    }
+    await runtime.restart(change)
     await reloadMain()
     if (!runtime.safeMode && mainWindow) shellWindow?.close()
   } catch (error) {
@@ -723,7 +777,7 @@ async function main(): Promise<void> {
         input: { appVersion: version, profileName: runtime.selected, platform: process.platform,
           mode: 'compatibility', macosMaterial: 'off', windowsMaterial: 'off', openBrowser: false, networkExposure: 'loopback',
           market: features.market ? 'community-market' : features.dshMarket ? 'dsh-market' : 'disabled', aaEnabled: features.remoteControl,
-          notifications: { enabled: true, notifyOnTurnCompletion: true, notifyOnTurnFailure: true, notifyOnJobCompletion: false, notifyOnJobFailure: false } } }
+          notifications: { enabled: true, notifyOnTurnCompletion: true, notifyOnTurnFailure: true, notifyOnJobCompletion: false, notifyOnJobFailure: false, notifyOnScheduleCompletion: true, notifyOnScheduleFailure: true } } }
     }
     if (value.action === 'dismiss-account') {
       if (onboarding || value.profile !== runtime.selected || runtime.safeMode || runtime.recoveryMode) throw new Error('Account setup is unavailable')
@@ -768,8 +822,18 @@ async function main(): Promise<void> {
   ipcMain.handle(IPC.permissionSettings, async (event, permission: unknown) => {
     await permissionGesture(event); await permissions.openSettings(permission)
   })
-  installMediaPermissions(session.defaultSession, permissions, {
+  installMediaPermissions(session.defaultSession, {
     window: () => mainWindow, language: () => windowsLanguage, warn: error => runtime.diagnostics.append(String(error), 'warn'),
+  })
+  installAppDownloads(session.defaultSession, {
+    window: () => mainWindow, language: () => windowsLanguage, downloads: () => app.getPath('downloads'),
+    warn: error => runtime.diagnostics.append(String(error), 'warn'),
+    // The same gate as renderer fetches; the marker is supplied here because the download bypassed webRequest.
+    forward: async url => {
+      const auth = runtime.auth
+      if (!runtime.backend.host || !auth) return new Response(null, { status: 503 })
+      return forwardWebRequest(new Request(url, { headers: { [NATIVE_ACCESS_HEADER]: auth.token } }), auth.url, auth.cookie, auth.token)
+    },
   })
   ipcMain.handle(IPC.material, event => { assertSender(event, mainWindow, APP_URL); return windowMaterial(runtime.preferences) })
   ipcMain.handle(IPC.command, (event, value: unknown) => { assertDesktopSender(event); return command(value, event.sender === shellWindow?.webContents ? 'shell' : 'app') })
@@ -814,10 +878,10 @@ async function main(): Promise<void> {
     return { languages: [...app.getPreferredSystemLanguages(), app.getLocale()], preference: null }
   })
   nativeTheme.on('updated', () => { if (mainWindow && !mainWindow.isDestroyed()) applyWindowMaterial(mainWindow, runtime.preferences) })
-  runtime.safeMode = process.argv.includes(SAFE_ARGUMENT)
+  runtime.safeMode = safeModeRequested
   runtime.recoveryMode = process.argv.includes(RECOVERY_ARGUMENT)
   runtime.initialize()
-  if (dataLocation.error) { runtime.recoveryMode = true; runtime.report(dataLocation.error) }
+  if (dataLocation.error && !runtime.safeMode) { runtime.recoveryMode = true; runtime.report(dataLocation.error) }
   if (!runtime.safeMode && !runtime.recoveryMode) {
     try {
       runtime.profiles.ensure(runtime.selected)
@@ -881,19 +945,25 @@ app.on('before-quit', event => {
   native.close()
   platformLogin.close()
   void Promise.all([updates.dispose(installingUpdate), (async () => { await recoveryRunner?.dispose(); await runtime.close() })()]).then(async () => {
+    // A staged installer must survive until handoff; the next boot removes it.
+    if (safeModeRequested && !installingUpdate) {
+      // Windows may still hold Chromium files until process exit; a normal boot
+      // retries the same bounded, junction-safe cleanup when those locks are gone.
+      try { cleanupDisposableTree(safeElectronData) }
+      catch (error) { runtime.diagnostics.append(`Safe Mode desktop state cleanup failed: ${String(error)}`, 'warn'); runtime.diagnostics.flush() }
+    }
     if (installingUpdate) {
       try { await updateInstaller.launch() }
       catch (error) {
         runtime.diagnostics.append(String(error), 'error')
         dialog.showErrorBox(t('更新未能安装', 'Update could not be installed'), t('应用将重新打开，请在设置中重试更新。', 'The application will reopen. Retry the update in Settings.'))
-        app.relaunch({ args: relaunchArguments(process.argv.slice(1), false, false) })
+        relaunchApp(app, relaunchArguments(process.argv.slice(1), false, false))
         app.quit()
       }
       if (process.platform === 'darwin') return
     }
-    if (relaunch) app.relaunch({ args: relaunch })
+    if (relaunch) relaunchApp(app, relaunch)
     app.quit()
   }, error => { console.error(error); app.exit(1) })
 })
-ownsInstance = claimDesktopSingleInstance(app, openMain)
 if (ownsInstance) void main().catch(error => runtime.report(error))

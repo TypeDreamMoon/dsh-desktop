@@ -28,6 +28,7 @@ import {
   readDesktopShellMode,
   resolveDesktopSettingsDocument,
   shippedSkillRoot,
+  UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS,
   validateDshMarketBundlePatches,
 } from '../src/profile.ts'
 import { setDesktopProfileBundleSelected } from '../src/desktop-plugins.ts'
@@ -683,6 +684,21 @@ virtualStoreDirMaxLength: 60
     expect(() => validateDshMarketBundlePatches([{
       insert: [{ id: 'dsh-market', name: 'unexpected-market' }],
     }])).toThrow('must insert exactly the canonical dsh-market row')
+  })
+
+  it('keeps upstream Desktop product analytics off even when a user patch enables it', () => {
+    const home = temporaryHome()
+    writeFileSync(join(ensureDesktopProfile(home), 'cordis.patch.yml'), [
+      '- id: product-analytics',
+      '  disabled: false',
+      '',
+    ].join('\n'))
+
+    const rows = composeEntries([prepareDesktopProfile(undefined, home, 'darwin').patches])
+
+    for (const id of UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS) {
+      expect(rows.find(row => row.id === id)).toEqual(expect.objectContaining({ disabled: true }))
+    }
   })
 
   it('boots a selected Web profile without overriding its compatibility UI rows', () => {

@@ -52,6 +52,8 @@ export interface DesktopNotificationSettings {
   readonly notifyOnTurnFailure: boolean
   readonly notifyOnJobCompletion: boolean
   readonly notifyOnJobFailure: boolean
+  readonly notifyOnScheduleCompletion: boolean
+  readonly notifyOnScheduleFailure: boolean
 }
 
 /** Registration-side business face for the Desktop settings section. */
@@ -463,6 +465,8 @@ export function DesktopSettingsSection({
     notifyOnTurnFailure: true,
     notifyOnJobCompletion: true,
     notifyOnJobFailure: true,
+    notifyOnScheduleCompletion: true,
+    notifyOnScheduleFailure: true,
   }
 
   const createProfile = (event: FormEvent): void => {
@@ -918,6 +922,18 @@ export function DesktopSettingsSection({
             checked={notificationValue.notifyOnTurnFailure}
             disabled={!notificationValue.enabled || !notificationsWritable || busy !== undefined}
             onChange={checked => { setNotification('notifyOnTurnFailure', checked) }}
+          />
+          <DesktopSettingsToggleRow
+            label={t('scheduleCompletion')}
+            checked={notificationValue.notifyOnScheduleCompletion}
+            disabled={!notificationValue.enabled || !notificationsWritable || busy !== undefined}
+            onChange={checked => { setNotification('notifyOnScheduleCompletion', checked) }}
+          />
+          <DesktopSettingsToggleRow
+            label={t('scheduleFailure')}
+            checked={notificationValue.notifyOnScheduleFailure}
+            disabled={!notificationValue.enabled || !notificationsWritable || busy !== undefined}
+            onChange={checked => { setNotification('notifyOnScheduleFailure', checked) }}
           />
           {capabilities?.jobNotifications !== false && <><DesktopSettingsToggleRow
             label={t('jobCompletion')}

@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
+const runtimeVersion = String(JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).dependencies['@deepseek-ai/dsh'])
 const patch = readFileSync(new URL(
-  '../../patches/dsh-api-session-controller@0.1.7-rc.2.patch',
+  `../../patches/dsh-api-session-controller@${runtimeVersion}.patch`,
   import.meta.url,
 ), 'utf8')
 

@@ -26,7 +26,6 @@ import {
   PROFILE_TEMPLATES,
   PROFILES_DIR,
   readProfileManifest,
-  removeLinkProjections,
   resolveProfileDir,
   writeProfileManifest,
   type Profile,
@@ -35,6 +34,7 @@ import {
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { isMap, isPair, isScalar, isSeq, parseAllDocuments, parseDocument, type Pair, type YAMLMap } from 'yaml'
 import { findOverlayPackage, resolveOverlayPackage } from './package-overlay.ts'
+import { removeLinkProjectionsSafely } from './link-projections.ts'
 import { DESKTOP_DEFAULT_WEB_PORT } from './desktop-port.ts'
 import {
   desktopBrowserAccessAvailable,
@@ -102,6 +102,8 @@ const PWSH_SANDBOX_ROW_ID = 'pwsh-sandbox'
 const UPSTREAM_PWSH_SANDBOX_PACKAGE = '@deepseek-ai/dsh-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_ROW_ID = 'desktop-windows-pwsh-sandbox'
 const DESKTOP_WINDOWS_PWSH_SANDBOX_PACKAGE = `${DESKTOP_PACKAGE_NAME}/windows-pwsh-sandbox`
+/** Upstream Web rows that exist only to send Desktop product analytics to DeepSeek. */
+export const UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS = ['desktop-product-telemetry', 'product-analytics'] as const
 const DEFAULT_DESKTOP_SHELL_MODE: DesktopShellMode = 'compatibility'
 const DEFAULT_DESKTOP_PORT = DESKTOP_DEFAULT_WEB_PORT
 const DESKTOP_WEB_SERVER_ROW_ID = 'desktop-webserver'
@@ -1584,6 +1586,14 @@ export function prepareDesktopProfile(
   if ((telemetryDisabled ?? '') !== '' && rows.has('session-telemetry-otel')) {
     patches.push({ id: 'session-telemetry-otel', disabled: true })
   }
+  // Upstream mounts its Desktop product analytics for every Profile named
+  // `desktop` and reports to DeepSeek's collector by default. DSH Desktop does
+  // not take part in that collection, so both rows stay off after every bundle
+  // and user layer. The exporter also requires the upstream Electron shell's
+  // DSH_CLIENT_VERSION, which this launcher never provides.
+  for (const id of UPSTREAM_PRODUCT_ANALYTICS_ROW_IDS) {
+    if (rows.has(id)) patches.push({ id, disabled: true })
+  }
   // Keep the shell row enabled, but pin none of its configuration.
   //
   // These launcher-injected patches compose *after* the profile's own
@@ -1643,10 +1653,12 @@ export function prepareDesktopProfile(
  * dsh 0.1.7-alpha.1 deleted `healProfilesModuleFallback`: profile-local packages are
  * served by the runtime resolution table instead of a materialized link tree, so there
  * is no fallback left to heal. All this can still usefully do is sweep the tree older
- * Desktop releases wrote, which `removeLinkProjections` does idempotently. Upstream runs
- * that sweep itself inside `loadProfile`, but Desktop composes profiles through
- * {@link loadRecoveryFilteredProfile} and never calls `loadProfile`, so this is the only
- * place a Desktop install cleans up after an upgrade.
+ * Desktop releases wrote. Upstream runs that sweep (`removeLinkProjections`) inside
+ * `loadProfile`, but Desktop composes profiles through {@link loadRecoveryFilteredProfile}
+ * and never calls `loadProfile`, so this is the only place a Desktop install cleans up
+ * after an upgrade. It uses {@link removeLinkProjectionsSafely}: the upstream helper's
+ * recursive `rmSync` follows the projection junctions under Electron 44 and empties the
+ * installation packages they point to.
  *
  * NOTE FOR FUTURE WORK: if Desktop ever needs to re-materialize a link tree of its own,
  * it must NOT reuse the directory name `.dsh-module-fallback`. 0.1.7's `loadProfile`
@@ -1660,10 +1672,10 @@ export function prepareDesktopProfile(
 export async function healDesktopProfileModuleFallback(home: string, profile?: Profile): Promise<void> {
   await Promise.resolve()
   if (profile !== undefined) {
-    removeLinkProjections(profile.dir)
+    removeLinkProjectionsSafely(profile.dir)
     return
   }
-  // Pre-boot callers have no profile yet. `removeLinkProjections` expects one profile
+  // Pre-boot callers have no profile yet. The sweep expects one profile
   // directory, so sweep every directory under the profiles root.
   const profilesDir = join(home, PROFILES_DIR)
   let entries: string[]
@@ -1675,7 +1687,7 @@ export async function healDesktopProfileModuleFallback(home: string, profile?: P
     if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return
     throw cause
   }
-  for (const dir of entries) removeLinkProjections(dir)
+  for (const dir of entries) removeLinkProjectionsSafely(dir)
 }
 
 /** Expose the package anchor for focused resolution tests. */

@@ -146,6 +146,8 @@ export const zh = {
   pwshProfileBody: '开启后每条命令都会加载你的 profile：命令更慢，profile 的输出也会进入模型上下文。重启后生效。',
   savingShell: '正在保存…',
   save: '保存',
+  scheduleCompletion: '自动化任务完成',
+  scheduleFailure: '自动化任务失败',
 } as const
 
 export type DesktopSettingsLocaleKey = keyof typeof zh
@@ -296,4 +298,6 @@ export const en: Record<DesktopSettingsLocaleKey, string> = {
   pwshProfileBody: 'Every command loads your profile: commands get slower and profile output reaches the model context. Takes effect after a restart.',
   savingShell: 'Saving…',
   save: 'Save',
+  scheduleCompletion: 'Automation task completed',
+  scheduleFailure: 'Automation task failed',
 }
