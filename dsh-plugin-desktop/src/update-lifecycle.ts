@@ -13,6 +13,7 @@ import { desktopTrayLabel } from './tray-locale.ts'
 import {
   checkForDesktopUpdate,
   parseSemVer,
+  parseCanonicalChannelVersion,
   type DesktopReleaseChannel,
   type UpdateCheckResult,
 } from './update-checker.ts'
@@ -256,6 +257,7 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       const confirmedVersion = confirmedResult?.status === 'update-available'
         ? confirmedResult.latestVersion
         : undefined
+      const confirmedDigests = confirmedResult?.installerSha256
       if (channel === (this.options.adapter.releaseChannel ?? 'stable')) this.observeResult(confirmedResult)
       if (confirmedVersion !== version || this.disposed) return
 
@@ -264,13 +266,16 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
       this.downloadingVersion = version
       this.registration.refresh()
       try {
+        // An omitted digest must not surface as a trailing undefined argument:
+        // the beta variant's spec pins the exact call shape.
+        const digestArguments = confirmedDigests === undefined ? [] : [confirmedDigests] as const
         if (this.options.adapter.releaseChannel === undefined && channel === 'stable') {
           await this.options.adapter.downloadAndOpen(
-            version, controller.signal, undefined, this.options.policy.source,
+            version, controller.signal, undefined, this.options.policy.source, ...digestArguments,
           )
         } else {
           await this.options.adapter.downloadAndOpen(
-            version, controller.signal, channel, this.options.policy.source,
+            version, controller.signal, channel, this.options.policy.source, ...digestArguments,
           )
         }
       } catch {
@@ -343,7 +348,12 @@ class DesktopUpdateLifecycleOwner implements DesktopUpdateLifecycle {
 }
 
 function parseState(text: string): ParsedUpdateState {
-  const value: unknown = JSON.parse(text)
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch (cause) {
+    throw new Error(`dsh-plugin-desktop: update state is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
   if (!isRecord(value)) throw new Error('invalid update state')
   if (value.version === 3
     && (value.lastNotifiedVersion === undefined || isSupportedVersion(value.lastNotifiedVersion))
@@ -397,7 +407,7 @@ function isSupportedVersion(value: unknown): value is string {
     || (parsed?.prerelease.length === 2
       && parsed.prerelease[0] === 'beta'
       && /^[0-9]+$/u.test(parsed.prerelease[1]!))
-  return parsed !== null && supportedPrerelease && parsed.version === value
+  return parsed !== null && (supportedPrerelease || parseCanonicalChannelVersion(value, 'next') !== null) && parsed.version === value
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -34,10 +34,19 @@ function settingsOverride(value: string | undefined, fallback: string): string {
   return value !== undefined && value.trim() !== '' ? value : fallback
 }
 
-/** Read the Desktop settings namespace; undefined before it registers. */
+/**
+ * Read the Desktop settings namespace from the composed Loader configuration.
+ *
+ * dsh 0.1.7 replaced the settings registry with `SettingsForms`, whose
+ * `describe()` projects every entry's live configuration by Loader entry id.
+ * @param ctx - the updates plugin context.
+ * @returns the Desktop section, or undefined before the row composes.
+ */
 function readDesktopUpdateSettings(ctx: Context): DesktopUpdateSettings | undefined {
   try {
-    return ctx.settings.get(DESKTOP_SETTINGS_NAMESPACE) as DesktopUpdateSettings | undefined
+    const entries = ctx.settings.describe()
+    const entry = entries.find(candidate => candidate.ns === DESKTOP_SETTINGS_NAMESPACE)
+    return entry?.value as DesktopUpdateSettings | undefined
   } catch {
     return undefined
   }

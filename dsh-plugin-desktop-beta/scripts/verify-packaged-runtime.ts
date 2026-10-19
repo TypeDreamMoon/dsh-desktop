@@ -1,7 +1,10 @@
 /** Fail-loud verification of the runtime entries sealed into Electron's app.asar. */
 
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
+  accessSync,
+  constants,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -13,11 +16,12 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, parse } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { getRawHeader } from '@electron/asar'
+import { extractFile, getRawHeader } from '@electron/asar'
 import {
   FORBIDDEN_MACOS_UNIVERSAL_ENTRIES,
   MACOS_UNIVERSAL_NATIVE_ENTRIES,
 } from './mac-universal.ts'
+import { expectedDesktopVersion, verifyDesktopRuntimeTree } from './prepare-runtime.ts'
 
 /** Resolve a package root even when its exports hide `package.json`. */
 export function resolveRuntimePackageRoot(
@@ -88,6 +92,7 @@ export const ALLOWED_SMART_UNPACK_PACKAGE_ROOTS = [
 
 /** Platform package families selected by native dependencies at package time. */
 export const ALLOWED_SMART_UNPACK_PACKAGE_PREFIXES = [
+  'node_modules/@dataiku/uv-',
   'node_modules/@deepseek-ai/node-addon-system-',
   'node_modules/@img/sharp-',
   'node_modules/@koromix/koffi-',
@@ -103,10 +108,16 @@ export const REQUIRED_DSH_CLI_RUNTIME_ENTRIES = Object.freeze(
     .sort(),
 )
 
-/** PTC preset inputs selected by upstream's historical Session migration. */
+/**
+ * PTC preset inputs selected by upstream's historical Session migration.
+ *
+ * dsh 0.1.7-alpha.1 replaced filesystem preset discovery (a directory per preset under
+ * `@deepseek-ai/dsh-agent-presets/presets`, each with `agent.cordis.yml` + `preset.yml`)
+ * with one patch file per preset shipped by the Web bundle, so the two entries collapse
+ * into a single declaration file.
+ */
 export const REQUIRED_AGENT_PRESET_RUNTIME_ENTRIES = [
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/ptc/agent.cordis.yml',
-  'node_modules/@deepseek-ai/dsh-agent-presets/presets/ptc/preset.yml',
+  'node_modules/@deepseek-ai/dsh-web-app/presets/ptc.patch.yml',
 ] as const
 
 /** AfterPack fields consumed without importing Electron Builder's incomplete declaration graph. */
@@ -849,6 +860,51 @@ export function reportUnpackedRuntime(summary: UnpackedRuntimeSummary): void {
   process.stdout.write(`dsh-plugin-desktop: packaged runtime inventory: ${formatUnpackedRuntimeSummary(summary)}\n`)
 }
 
+/** Verify the AA version and built entry sealed into the actual installation payload. */
+export function verifyPackagedAgentsAnywhere(
+  context: PackagedRuntimeContext,
+  readInstalled: (path: string) => Buffer = readFileSync,
+  readPackaged: (path: string) => Buffer = path => usesAsarLayout(context)
+    ? extractFile(resolvePackagedAsarPath(context), path)
+    : readFileSync(join(resolvePackagedApplicationRoot(context), path)),
+): void {
+  if (context.electronPlatformName === 'darwin') {
+    const root = usesAsarLayout(context) ? resolvePackagedUnpackedRoot(context) : resolvePackagedApplicationRoot(context)
+    for (const entry of MACOS_UNIVERSAL_NATIVE_ENTRIES.filter(entry => entry.path.endsWith('/bin/uv'))) {
+      accessSync(join(root, entry.path), constants.X_OK)
+    }
+  }
+  const packagePath = 'node_modules/@agents-anywhere/dsh-bridge-next'
+  const desktopRoot = context.packager.projectDir ?? DESKTOP_PACKAGE_ROOT
+  const expected = JSON.parse(readInstalled(join(desktopRoot, packagePath, 'package.json')).toString()) as { version: string }
+  const actual = JSON.parse(readPackaged(`${packagePath}/package.json`).toString()) as { version: string }
+  if (expected.version !== actual.version) {
+    throw new Error(`Packaged AA version mismatch: expected ${expected.version}, received ${actual.version}`)
+  }
+  const digest = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
+  if (digest(readInstalled(join(desktopRoot, packagePath, 'lib/index.js')))
+    !== digest(readPackaged(`${packagePath}/lib/index.js`))) {
+    throw new Error('Packaged AA entry differs from the prepared release dependency')
+  }
+}
+
+/**
+ * Check the interpreter payloads Electron Builder copied beside the application as extra resources:
+ * every CPU this platform ships declares the platform, CPU and product version with Node, pnpm and
+ * the Office resources. Linux ships no payload and passes with none.
+ * @param context - Electron Builder's afterPack or afterAllArtifactBuild context.
+ * @returns The verified payload CPUs.
+ */
+export function verifyPackagedPrimaryRuntime(context: PackagedRuntimeContext): string[] {
+  const resources = dirname(resolvePackagedApplicationRoot(context))
+  const projectDir = context.packager.projectDir ?? join(dirname(fileURLToPath(import.meta.url)), '..')
+  const runtimes = verifyDesktopRuntimeTree(join(resources, 'runtime'), context.electronPlatformName as NodeJS.Platform, expectedDesktopVersion(projectDir))
+  for (const runtime of runtimes) {
+    console.log(`Verified the ${runtime.arch} primary runtime: Python ${runtime.manifest.python}, Node ${String(runtime.manifest.node)}, pnpm ${String(runtime.manifest.pnpm)}`)
+  }
+  return runtimes.map(runtime => runtime.arch)
+}
+
 /**
  * Run the static packaged-runtime check as Electron Builder's afterPack hook.
  * @param context - Electron Builder's afterPack context.
@@ -858,8 +914,12 @@ export async function afterPack(
   context: PackagedRuntimeContext,
   verify: typeof verifyPackagedRuntime = verifyPackagedRuntime,
   report: (summary: UnpackedRuntimeSummary) => void = reportUnpackedRuntime,
+  verifyAa: typeof verifyPackagedAgentsAnywhere = verifyPackagedAgentsAnywhere,
+  verifyRuntime: typeof verifyPackagedPrimaryRuntime = verifyPackagedPrimaryRuntime,
 ): Promise<void> {
   const summary = verify(context)
+  verifyAa(context)
+  verifyRuntime(context)
   report(summary)
 }
 

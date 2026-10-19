@@ -130,6 +130,30 @@ describe('macOS DMG smoke artifact verification', () => {
     expect(harness.removeMountPoint).toHaveBeenCalledWith(value.root)
   })
 
+  it('checks bundled resources inside the mounted application after the native entries', () => {
+    const value = fixture()
+    const seen: string[] = []
+    const harness = options({ makeMountPoint: () => value.root, verifyRuntime: appPath => { seen.push(appPath) } }, value.modeOverrides)
+    verifyMacSmoke(harness.value)
+    expect(seen).toEqual([join(value.root, 'DSH Desktop.app')])
+    expect(harness.calls.at(-1)).toEqual({ command: 'hdiutil', args: ['detach', value.root] })
+  })
+
+  it('checks only the packaged slice of a single-architecture smoke', () => {
+    const value = fixture()
+    const harness = options(
+      { makeMountPoint: () => value.root, executableSlices: ['arm64'] },
+      value.modeOverrides,
+    )
+
+    verifyMacSmoke(harness.value)
+
+    const executableChecks = harness.calls
+      .filter(call => call.command === 'lipo' && call.args[0] === value.executable)
+      .map(call => call.args)
+    expect(executableChecks).toEqual([[value.executable, '-verify_arch', 'arm64']])
+  })
+
   it('rejects the mount when no DMG is present', () => {
     const harness = options({ listDmgs: () => [] })
 

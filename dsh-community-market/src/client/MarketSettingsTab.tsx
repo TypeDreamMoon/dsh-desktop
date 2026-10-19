@@ -1,23 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
-  IconCheckOutline16,
-  IconChevronDownOutline14,
-  IconChevronUpOutline14,
-  IconCordisPluginOutline14,
-  IconDataOutline16,
-  IconDownloadOutline16,
-  IconGlobeOutline14,
-  IconPlusOutline16,
-  IconRefreshOutline16,
-  IconRightUpOutline16,
-  IconSearchOutline16,
-  IconSettingsOutline16,
-  IconTrashOutline16,
+  IconCheckOutlineRegular,
+  IconChevronDownOutlineRegular,
+  IconChevronUpOutlineRegular,
+  IconCordisPluginOutlineRegular,
+  IconDataOutlineRegular,
+  IconDownloadOutlineRegular,
+  IconGlobeOutlineRegular,
+  IconPlusOutlineRegular,
+  IconRefreshOutlineRegular,
+  IconRightUpOutlineRegular,
+  IconSearchOutlineRegular,
+  IconSettingsOutlineRegular,
+  IconTrashOutlineRegular,
   Input,
   Modal,
   Pill,
   StateDot,
+  Switch,
+  Toast,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -28,6 +30,7 @@ import type {
   MarketCatalogSourceResult,
   MarketInstallationView,
   MarketInstallableResponse,
+  MarketOperationApplication,
   MarketOperationPreviewRequest,
   MarketOperationPreviewResponse,
   MarketSourceMutation,
@@ -45,7 +48,7 @@ import {
   readMarketInstallations,
   readMarketState,
   readMoreMarketCatalog,
-  requestMarketRestart,
+  setMarketInstallationEnabled,
 } from './api.js'
 
 type MarketItem = CatalogSnapshot['items'][number]
@@ -74,9 +77,10 @@ interface VisibleItem {
   readonly stale: boolean
 }
 
-interface CompletedOperation {
-  readonly preview: MarketOperationPreviewResponse
-  readonly restartToken: string
+/** A completed package change, announced once as a transient banner. */
+interface OperationNotice {
+  readonly seq: number
+  readonly text: string
 }
 
 type ManualInstallHint = MarketCatalogResponse['manualInstall'][number]
@@ -139,7 +143,7 @@ function PluginIcon({ item, large = false }: { item: MarketItem; large?: boolean
   const icon = item.media?.icon
   return (
     <div className={large ? 'dshMarketGlyph dshMarketGlyphLarge' : 'dshMarketGlyph'}>
-      <IconCordisPluginOutline14 size={large ? 28 : 20} />
+      <IconCordisPluginOutlineRegular size={large ? 28 : 20} />
       {icon !== undefined && (
         <img
           src={marketMediaAssetUrl(icon.assetRef)}
@@ -276,7 +280,9 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
   const [selectedInventoryLoading, setSelectedInventoryLoading] = useState(false)
   const [selectedInventoryError, setSelectedInventoryError] = useState<string>()
   const [operationPreview, setOperationPreview] = useState<MarketOperationPreviewResponse>()
-  const [operationSuccess, setOperationSuccess] = useState<CompletedOperation>()
+  const [operationNotice, setOperationNotice] = useState<OperationNotice>()
+  const [togglingPackage, setTogglingPackage] = useState<string>()
+  const [toggleError, setToggleError] = useState<string>()
   const [operationError, setOperationError] = useState<string>()
   const [operationErrorDetailsValue, setOperationErrorDetailsValue] = useState<string>()
   const [operationExecutionFailed, setOperationExecutionFailed] = useState(false)
@@ -291,6 +297,8 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
   const operationRequest = useRef<AbortController>()
   const operationStage = useRef<'preview' | 'execute'>()
   const desktopActionRequest = useRef<AbortController>()
+  const toggleRequest = useRef<AbortController>()
+  const noticeSeq = useRef(0)
   const selectedKeyRef = useRef<string>()
   const viewRef = useRef<MarketView>(initialView)
 
@@ -494,13 +502,19 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
     }
   }, [readLocale, t])
 
+  // Mount once. The loaders are re-created whenever the locale hands out a new
+  // `t` (a client plugin registering or dropping its dictionary does that in the
+  // middle of a toggle or install), and re-running this effect on that change
+  // would abort the very request that caused it.
+  const loaders = useRef({ loadState, loadInstallable })
+  loaders.current = { loadState, loadInstallable }
   useEffect(() => {
     setQuery('')
     if (viewRef.current === 'installable') {
-      void loadState('', [], false, false)
-      void loadInstallable(false, '', [])
+      void loaders.current.loadState('', [], false, false)
+      void loaders.current.loadInstallable(false, '', [])
     } else {
-      void loadState('', [])
+      void loaders.current.loadState('', [])
     }
     return () => {
       readRequest.current?.abort()
@@ -510,6 +524,7 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
       installationsRequest.current?.abort()
       operationRequest.current?.abort()
       desktopActionRequest.current?.abort()
+      toggleRequest.current?.abort()
       readRequest.current = undefined
       pageRequest.current = undefined
       mutationRequest.current = undefined
@@ -517,8 +532,9 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
       installationsRequest.current = undefined
       operationRequest.current = undefined
       desktopActionRequest.current = undefined
+      toggleRequest.current = undefined
     }
-  }, [loadInstallable, loadState])
+  }, [])
 
   useEffect(() => {
     // Source state can resolve before React commits it. Load after the view and
@@ -578,7 +594,7 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
       const next: MarketStateResponse = {
         sources,
         builtIns: state?.builtIns ?? [],
-        desktopActions: state?.desktopActions ?? { openTerminal: false, requestRestart: false },
+        desktopActions: state?.desktopActions ?? { openTerminal: false },
       }
       const sourceChanged = selectedSource(state?.sources ?? [])?.sourceRecordId
         !== selectedSource(sources)?.sourceRecordId
@@ -709,7 +725,6 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
     setOperationErrorDetailsValue(undefined)
     setOperationExecutionFailed(false)
     setDesktopActionError(undefined)
-    setOperationSuccess(undefined)
     try {
       const preview = await previewMarketOperation(requestValue, request.signal)
       if (request.signal.aborted || operationRequest.current !== request) return
@@ -751,7 +766,6 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
     setSelectedInventoryLoading(false)
     setSelectedInventoryError(undefined)
     setOperationPreview(undefined)
-    setOperationSuccess(undefined)
     setOperationError(undefined)
     setOperationErrorDetailsValue(undefined)
     setOperationExecutionFailed(false)
@@ -832,15 +846,16 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
         if (result.action === 'install') return current
         return current.filter(installation => installation.packageName !== result.packageName)
       })
-      setInstallationsLoaded(true)
       setOperationPreview(undefined)
       selectedKeyRef.current = undefined
       setSelected(undefined)
-      setOperationSuccess({ preview, restartToken: result.restartToken })
+      announce(`${t(result.action === 'install' ? 'installComplete' : 'uninstallComplete')}${applicationHint(result.application)}`)
       if (result.action === 'install' && viewRef.current === 'installable') {
         void loadInstallable(false, appliedInstallableQuery, installableCategories)
       }
-      if (result.action === 'uninstall' && viewRef.current === 'installed') {
+      // The official manager applied the change live; read its inventory again
+      // wherever the Installed state is on screen or already cached.
+      if (viewRef.current === 'installed' || installationsLoaded) {
         void loadInstallations()
       }
     } catch (cause) {
@@ -863,26 +878,66 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
     }
   }
 
-  const runDesktopAction = async (action: 'open-terminal' | 'request-restart', restartToken?: string) => {
+  const announce = (text: string) => {
+    noticeSeq.current += 1
+    setOperationNotice({ seq: noticeSeq.current, text })
+  }
+
+  const applicationHint = (application: MarketOperationApplication): string => application === 'restart-required'
+    ? ` ${t('restartHint')}`
+    : application === 'overridden' ? ` ${t('overriddenHint')}` : ''
+
+  const openTerminal = async () => {
     if (desktopActionRequest.current !== undefined) return
     const request = new AbortController()
     desktopActionRequest.current = request
     setDesktopActionPending(true)
     setDesktopActionError(undefined)
     try {
-      if (action === 'open-terminal') await openMarketTerminal(request.signal)
-      else if (restartToken !== undefined) await requestMarketRestart(restartToken, request.signal)
-      else throw new Error('restart token missing')
+      await openMarketTerminal(request.signal)
     } catch (cause) {
       if (request.signal.aborted || desktopActionRequest.current !== request) return
-      setDesktopActionError(t(isDesktopUnavailable(cause)
-        ? 'desktopActionUnavailable'
-        : action === 'open-terminal' ? 'terminalError' : 'restartError'))
+      setDesktopActionError(t(isDesktopUnavailable(cause) ? 'desktopActionUnavailable' : 'terminalError'))
     } finally {
       if (desktopActionRequest.current === request) {
         desktopActionRequest.current = undefined
         setDesktopActionPending(false)
       }
+    }
+  }
+
+  const toggleInstallation = async (packageName: string, enabled: boolean) => {
+    if (toggleRequest.current !== undefined || operationRequest.current !== undefined) return
+    const request = new AbortController()
+    toggleRequest.current = request
+    setTogglingPackage(packageName)
+    setToggleError(undefined)
+    try {
+      const result = await setMarketInstallationEnabled(packageName, enabled, request.signal)
+      if (request.signal.aborted || toggleRequest.current !== request) return
+      setInstallations(current => current.map(installation => installation.packageName === result.packageName
+        ? { ...installation, enabled: result.enabled }
+        : installation))
+      setSelectedInstallation(current => current?.packageName === result.packageName
+        ? { ...current, enabled: result.enabled }
+        : current)
+      announce(`${t(result.enabled ? 'enableComplete' : 'disableComplete')}${applicationHint(result.application)}`)
+      // Read the official inventory again: a layer the Host could not load reports its error there.
+      if (viewRef.current === 'installed' || installationsLoaded) void loadInstallations()
+    } catch (cause) {
+      if (request.signal.aborted || toggleRequest.current !== request) return
+      if (isDesktopUnavailable(cause)) {
+        setInstallationsUnavailable(true)
+        setInstallationsError(t('desktopUnavailable'))
+        setToggleError(t('desktopUnavailable'))
+      } else {
+        setToggleError(operationErrorMessage(cause, t('toggleError')))
+        // Show the selection the Host saved whatever it could apply.
+        void loadInstallations()
+      }
+    } finally {
+      if (toggleRequest.current === request) toggleRequest.current = undefined
+      setTogglingPackage(current => current === packageName ? undefined : current)
     }
   }
 
@@ -903,16 +958,16 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
       <div className="dshMarketViewBar">
         <div className="dshMarketViewSwitch" role="group" aria-label={t('title')}>
           <Pill active={view === 'discover'} aria-pressed={view === 'discover'} onClick={() => selectMarketView('discover')}>
-            <IconDataOutline16 size={14} /><span>{t('discover')}</span>
+            <IconDataOutlineRegular size={14} /><span>{t('discover')}</span>
           </Pill>
           <Pill active={view === 'installable'} aria-pressed={view === 'installable'} onClick={() => selectMarketView('installable')}>
-            <IconDownloadOutline16 size={14} /><span>{t('installable')}</span>
+            <IconDownloadOutlineRegular size={14} /><span>{t('installable')}</span>
           </Pill>
           <Pill active={view === 'installed'} aria-pressed={view === 'installed'} onClick={() => selectMarketView('installed')}>
-            <IconCheckOutline16 size={14} /><span>{t('installed')}</span>
+            <IconCheckOutlineRegular size={14} /><span>{t('installed')}</span>
           </Pill>
           <Pill active={view === 'sources'} aria-pressed={view === 'sources'} onClick={() => selectMarketView('sources')}>
-            <IconSettingsOutline16 size={14} /><span>{t('sources')}</span>
+            <IconSettingsOutlineRegular size={14} /><span>{t('sources')}</span>
           </Pill>
         </div>
         <Pill className="dshMarketCurrentSource">
@@ -922,7 +977,7 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
               ? `${t('currentSource')}: ${currentSource.name}`
               : (
                 <a href={currentSourceHref} target="_blank" rel="noopener noreferrer">
-                  {t('currentSource')}: {currentSource.name} <IconRightUpOutline16 size={12} />
+                  {t('currentSource')}: {currentSource.name} <IconRightUpOutlineRegular size={12} />
                 </a>
               )}
         </Pill>
@@ -997,9 +1052,12 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
             unavailable={installationsUnavailable}
             error={installationsError ?? operationError}
             operationPending={operationPending}
-            onRetry={() => { void loadInstallations() }}
-            onUninstall={bundleId => {
-              void beginOperationPreview({ action: 'uninstall', bundleId })
+            togglingPackage={togglingPackage}
+            toggleError={toggleError}
+            onRetry={() => { setToggleError(undefined); void loadInstallations() }}
+            onToggle={(packageName, enabled) => { void toggleInstallation(packageName, enabled) }}
+            onUninstall={packageName => {
+              void beginOperationPreview({ action: 'uninstall', packageName })
             }}
             t={t}
           />
@@ -1030,16 +1088,19 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
           executionFailed={operationExecutionFailed}
           desktopActionError={desktopActionError}
           desktopActionPending={desktopActionPending}
+          toggling={togglingPackage}
+          toggleError={toggleError}
           canOpenTerminal={state?.desktopActions.openTerminal === true}
           verificationHelpHref={installRequirementsUrl(readLocale())}
           onClose={closeItem}
           onConfirm={() => { void executePreview() }}
-          onOpenTerminal={() => { void runDesktopAction('open-terminal') }}
-          onUninstall={bundleId => {
+          onOpenTerminal={() => { void openTerminal() }}
+          onToggle={(packageName, enabled) => { void toggleInstallation(packageName, enabled) }}
+          onUninstall={packageName => {
             selectedKeyRef.current = undefined
             setSelected(undefined)
             setSelectedInstallation(undefined)
-            void beginOperationPreview({ action: 'uninstall', bundleId })
+            void beginOperationPreview({ action: 'uninstall', packageName })
           }}
           t={t}
         />
@@ -1060,15 +1121,12 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
           t={t}
         />
       )}
-      {operationSuccess !== undefined && (
-        <OperationSuccessModal
-          operation={operationSuccess}
-          canRestart={state?.desktopActions.requestRestart === true}
-          pending={desktopActionPending}
-          error={desktopActionError}
-          onClose={() => setOperationSuccess(undefined)}
-          onRestart={() => { void runDesktopAction('request-restart', operationSuccess.restartToken) }}
-          t={t}
+      {operationNotice !== undefined && (
+        <Toast
+          key={operationNotice.seq}
+          text={operationNotice.text}
+          tone="success"
+          onDone={() => setOperationNotice(undefined)}
         />
       )}
       <Modal
@@ -1083,7 +1141,7 @@ export function MarketSurface({ initialView = 'installable', readLocale, t, show
           <Button variant="ghost" disabled={mutationPending} onClick={() => setAddOpen(false)}>{t('cancel')}</Button>
           <Button
             variant="primary"
-            icon={<IconPlusOutline16 />}
+            icon={<IconPlusOutlineRegular />}
             disabled={mutationPending || !manifestUrl.trim()}
             onClick={() => {
               void mutate({ action: 'add-standard', manifestUrl: manifestUrl.trim() }).then(succeeded => {
@@ -1145,10 +1203,10 @@ function DiscoverView(props: {
   const noSources = props.state !== undefined && !props.state.sources.some(source => source.enabled)
   if (noSources) return (
     <div className="dshMarketEmpty">
-      <div className="dshMarketEmptyIcon"><IconGlobeOutline14 size={24} /></div>
+      <div className="dshMarketEmptyIcon"><IconGlobeOutlineRegular size={24} /></div>
       <h2>{props.t('emptyTitle')}</h2>
       <p>{props.t('emptyBody')}</p>
-      <Button variant="primary" icon={<IconSettingsOutline16 />} onClick={props.onSources}>{props.t('chooseSources')}</Button>
+      <Button variant="primary" icon={<IconSettingsOutlineRegular />} onClick={props.onSources}>{props.t('chooseSources')}</Button>
     </div>
   )
   return (
@@ -1166,13 +1224,13 @@ function DiscoverView(props: {
       <form className="dshMarketToolbar" onSubmit={event => { event.preventDefault(); props.onSearch() }}>
         <Input
           className="dshMarketSearch"
-          icon={<IconSearchOutline16 />}
+          icon={<IconSearchOutlineRegular />}
           value={props.query}
           disabled={props.mutationPending}
           placeholder={props.t('search')}
           onChange={event => props.onQuery(event.currentTarget.value)}
         />
-        <Button type="submit" variant="primary" disabled={props.mutationPending} icon={<IconSearchOutline16 />}>{props.t('searchAction')}</Button>
+        <Button type="submit" variant="primary" disabled={props.mutationPending} icon={<IconSearchOutlineRegular />}>{props.t('searchAction')}</Button>
         <Tooltip label={props.t('refresh')}>
           <Button
             type="button"
@@ -1180,7 +1238,7 @@ function DiscoverView(props: {
             variant="toolbar"
             aria-label={props.t('refresh')}
             disabled={props.loading || props.loadingMore || props.mutationPending}
-            icon={<IconRefreshOutline16 />}
+            icon={<IconRefreshOutlineRegular />}
             onClick={props.onRefresh}
           />
         </Tooltip>
@@ -1205,7 +1263,7 @@ function DiscoverView(props: {
         <div className="dshMarketEmpty" role="alert">
           <StateDot state="error" size={14} />
           <h2>{props.t('catalogError')}</h2><p>{props.error}</p>
-          <Button variant="outline" icon={<IconRefreshOutline16 />} onClick={props.onRefresh}>{props.t('retry')}</Button>
+          <Button variant="outline" icon={<IconRefreshOutlineRegular />} onClick={props.onRefresh}>{props.t('retry')}</Button>
         </div>
       )}
       {props.error === undefined && props.loading && props.items.length === 0 && (
@@ -1262,10 +1320,10 @@ function InstallableView(props: {
   const noSources = props.state !== undefined && !props.state.sources.some(source => source.enabled)
   if (noSources) return (
     <div className="dshMarketEmpty">
-      <div className="dshMarketEmptyIcon"><IconGlobeOutline14 size={24} /></div>
+      <div className="dshMarketEmptyIcon"><IconGlobeOutlineRegular size={24} /></div>
       <h2>{props.t('emptyTitle')}</h2>
       <p>{props.t('emptyBody')}</p>
-      <Button variant="primary" icon={<IconSettingsOutline16 />} onClick={props.onSources}>{props.t('chooseSources')}</Button>
+      <Button variant="primary" icon={<IconSettingsOutlineRegular />} onClick={props.onSources}>{props.t('chooseSources')}</Button>
     </div>
   )
   if (props.unavailable) return (
@@ -1282,7 +1340,7 @@ function InstallableView(props: {
     <div className="dshMarketEmpty" role="alert">
       <StateDot state="error" size={14} />
       <h2>{props.t('installableError')}</h2>
-      <Button variant="outline" icon={<IconRefreshOutline16 />} onClick={props.onRetry}>{props.t('retry')}</Button>
+      <Button variant="outline" icon={<IconRefreshOutlineRegular />} onClick={props.onRetry}>{props.t('retry')}</Button>
     </div>
   )
   if (!props.loaded) return (
@@ -1296,7 +1354,7 @@ function InstallableView(props: {
           variant="outline"
           size="sm"
           disabled={props.loading || props.operationPending}
-          icon={<IconRefreshOutline16 />}
+          icon={<IconRefreshOutlineRegular />}
           onClick={props.onRefresh}
         >{props.t('rescanInstallable')}</Button>
       </div>
@@ -1312,7 +1370,7 @@ function InstallableView(props: {
       <form className="dshMarketToolbar" onSubmit={event => { event.preventDefault(); props.onSearch() }}>
         <Input
           className="dshMarketSearch"
-          icon={<IconSearchOutline16 />}
+          icon={<IconSearchOutlineRegular />}
           value={props.query}
           disabled={props.operationPending}
           placeholder={props.t('search')}
@@ -1322,7 +1380,7 @@ function InstallableView(props: {
           type="submit"
           variant="primary"
           disabled={props.operationPending}
-          icon={<IconSearchOutline16 />}
+          icon={<IconSearchOutlineRegular />}
         >{props.t('searchAction')}</Button>
         <Pill>{props.totalItems}</Pill>
       </form>
@@ -1382,8 +1440,11 @@ function InstalledView(props: {
   unavailable: boolean
   error?: string | undefined
   operationPending: boolean
+  togglingPackage?: string | undefined
+  toggleError?: string | undefined
   onRetry: () => void
-  onUninstall: (bundleId: string) => void
+  onToggle: (packageName: string, enabled: boolean) => void
+  onUninstall: (packageName: string) => void
   t: MarketSettingsTabProps['t']
 }) {
   if (props.unavailable) return (
@@ -1400,7 +1461,7 @@ function InstalledView(props: {
     <div className="dshMarketEmpty" role="alert">
       <StateDot state="error" size={14} />
       <h2>{props.t('installationsError')}</h2>
-      <Button variant="outline" icon={<IconRefreshOutline16 />} onClick={props.onRetry}>{props.t('retry')}</Button>
+      <Button variant="outline" icon={<IconRefreshOutlineRegular />} onClick={props.onRetry}>{props.t('retry')}</Button>
     </div>
   )
   return (
@@ -1411,20 +1472,23 @@ function InstalledView(props: {
           variant="outline"
           size="sm"
           disabled={props.loading || props.operationPending}
-          icon={<IconRefreshOutline16 />}
+          icon={<IconRefreshOutlineRegular />}
           onClick={props.onRetry}
         >{props.t('refresh')}</Button>
       </div>
       {props.error !== undefined && <div className="dshMarketBanner" role="alert"><StateDot state="error" />{props.error}</div>}
+      {props.toggleError !== undefined && <div className="dshMarketBanner" role="alert"><StateDot state="error" />{props.toggleError}</div>}
       {props.installations.length === 0 ? (
         <div className="dshMarketEmpty"><h2>{props.t('noInstalled')}</h2><p>{props.t('noInstalledBody')}</p></div>
       ) : (
         <div className="dshMarketReceipts">
           {props.installations.map(installation => (
             <InstallationCard
-              key={installation.bundleId}
+              key={installation.packageName}
               installation={installation}
               operationPending={props.operationPending}
+              toggling={props.togglingPackage === installation.packageName}
+              onToggle={props.onToggle}
               onUninstall={props.onUninstall}
               t={props.t}
             />
@@ -1438,34 +1502,43 @@ function InstalledView(props: {
 function InstallationCard(props: {
   installation: MarketInstallationView
   operationPending: boolean
-  onUninstall: (bundleId: string) => void
+  toggling: boolean
+  onToggle: (packageName: string, enabled: boolean) => void
+  onUninstall: (packageName: string) => void
   t: MarketSettingsTabProps['t']
 }) {
   const { installation } = props
   const packageName = installation.packageName
-  const displayName = packageName
+  const broken = installation.error !== undefined
+  const readOnly = !installation.toggleable && !installation.removable
   return (
     <article className="dshMarketReceipt">
       <div className="dshMarketReceiptMain">
         <div className="dshMarketReceiptTitle">
-          <StateDot state={installation.status === 'disabled' ? 'warning' : 'done'} size={10} />
-          <h3>{displayName}</h3>
-          <Pill>{props.t('profileDependency')}</Pill>
-          <Pill>{props.t(installation.status === 'disabled' ? 'disabledPlugin' : 'activePlugin')}</Pill>
+          <StateDot state={broken ? 'error' : installation.enabled ? 'done' : 'idle'} size={10} />
+          <h3>{packageName}</h3>
+          {readOnly && <Pill>{props.t('immutablePlugin')}</Pill>}
+          <Pill>{props.t(broken ? 'brokenPlugin' : installation.enabled ? 'activePlugin' : 'disabledPlugin')}</Pill>
         </div>
         <div className="dshMarketReceiptMeta">
-          <span>{packageName}</span>
-          {installation.status === 'disabled' && <span>{props.t('disabledRestartRequired')}</span>}
+          {installation.version !== undefined && <span>{props.t('pluginVersion')}: {installation.version}</span>}
+          {installation.error !== undefined && <span>{installation.error}</span>}
         </div>
       </div>
       <div className="dshMarketReceiptActions">
-        {installation.action === 'uninstall' && <Button
+        {installation.toggleable && <Switch
+          label={`${props.t('enablePlugin')}: ${packageName}`}
+          checked={installation.enabled}
+          disabled={props.operationPending || props.toggling}
+          onChange={enabled => props.onToggle(packageName, enabled)}
+        />}
+        {installation.removable && <Button
           variant="outline"
           size="sm"
-          aria-label={`${props.t('uninstall')}: ${displayName}`}
-          disabled={props.operationPending}
-          icon={<IconTrashOutline16 />}
-          onClick={() => props.onUninstall(installation.bundleId)}
+          aria-label={`${props.t('uninstall')}: ${packageName}`}
+          disabled={props.operationPending || props.toggling}
+          icon={<IconTrashOutlineRegular />}
+          onClick={() => props.onUninstall(packageName)}
         >{props.t('uninstall')}</Button>}
       </div>
     </article>
@@ -1558,7 +1631,7 @@ function ItemSourceRow({ source, t }: {
             rel="noopener noreferrer"
             aria-label={`${t('source')}: ${label}`}
           >
-            {label} <IconRightUpOutline16 size={12} />
+            {label} <IconRightUpOutlineRegular size={12} />
           </a>
         )}
     </div>
@@ -1581,10 +1654,10 @@ function SourcesView({ state, catalog, error, pending, adapterGuideHref, onMutat
     <div className="dshMarketContent">
       <div className="dshMarketSectionHead">
         <div><h2>{t('sources')}</h2><p>{t('sourceNotice')}</p></div>
-        <Button variant="outline" disabled={pending} icon={<IconPlusOutline16 />} onClick={onAddStandard}>{t('addStandard')}</Button>
+        <Button variant="outline" disabled={pending} icon={<IconPlusOutlineRegular />} onClick={onAddStandard}>{t('addStandard')}</Button>
       </div>
       <div className="dshMarketBanner dshMarketSourceGuide">
-        <IconGlobeOutline14 size={14} />
+        <IconGlobeOutlineRegular size={14} />
         <span>
           {t('sourcePartnershipBefore')}
           <a href={DSH_DESKTOP_ISSUES_URL} target="_blank" rel="noopener noreferrer">{t('sourcePartnershipContact')}</a>
@@ -1678,7 +1751,7 @@ function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, 
             size="sm"
             aria-label={t('moveUp')}
             disabled={pending || !canMoveUp}
-            icon={<IconChevronUpOutline14 />}
+            icon={<IconChevronUpOutlineRegular size={14} />}
             onClick={onMoveUp}
           />
         </Tooltip>
@@ -1689,7 +1762,7 @@ function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, 
             size="sm"
             aria-label={t('moveDown')}
             disabled={pending || !canMoveDown}
-            icon={<IconChevronDownOutline14 />}
+            icon={<IconChevronDownOutlineRegular size={14} />}
             onClick={onMoveDown}
           />
         </Tooltip>
@@ -1699,7 +1772,7 @@ function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, 
           role="radio"
           aria-checked={source.enabled}
           disabled={pending}
-          icon={source.enabled ? <IconCheckOutline16 /> : undefined}
+          icon={source.enabled ? <IconCheckOutlineRegular /> : undefined}
           onClick={onSelect}
         >{source.enabled ? t('selectedSource') : t('selectSource')}</Button>
         <Tooltip label={t('remove')}>
@@ -1709,7 +1782,7 @@ function SourceRow({ source, result, pending, canMoveUp, canMoveDown, onMoveUp, 
             size="sm"
             aria-label={t('remove')}
             disabled={pending}
-            icon={<IconTrashOutline16 />}
+            icon={<IconTrashOutlineRegular />}
             onClick={onRemove}
           />
         </Tooltip>
@@ -1731,7 +1804,7 @@ function AvailableSource({ provider, pending, onAdd, t }: {
         <p>{provider.description}</p>
         <SourceAttribution attribution={provider.attribution} />
       </div>
-      <Button variant="outline" size="sm" disabled={pending} icon={<IconPlusOutline16 />} onClick={onAdd}>{t('add')}</Button>
+      <Button variant="outline" size="sm" disabled={pending} icon={<IconPlusOutlineRegular />} onClick={onAdd}>{t('add')}</Button>
     </div>
   )
 }
@@ -1788,7 +1861,7 @@ function OperationConfirmModal({ preview, pending, error, onCancel, onConfirm, t
         <Button
           variant="primary"
           disabled={pending}
-          icon={installing ? <IconDownloadOutline16 /> : <IconTrashOutline16 />}
+          icon={installing ? <IconDownloadOutlineRegular /> : <IconTrashOutlineRegular />}
           onClick={onConfirm}
         >{confirmLabel}</Button>
       </div>}
@@ -1806,51 +1879,7 @@ function OperationConfirmModal({ preview, pending, error, onCancel, onConfirm, t
             </span>
           </div>
         )}
-        <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('restartAfterOperation')}</span></div>
         {pending && <div className="dshMarketOperationProgress" role="status"><StateDot state="ongoing" size={12} />{confirmLabel}</div>}
-        {error !== undefined && <div className="dshMarketError" role="alert">{error}</div>}
-      </div>
-    </Modal>
-  )
-}
-
-function OperationSuccessModal({ operation, canRestart, pending, error, onClose, onRestart, t }: {
-  operation: CompletedOperation
-  canRestart: boolean
-  pending: boolean
-  error?: string | undefined
-  onClose: () => void
-  onRestart: () => void
-  t: MarketSettingsTabProps['t']
-}) {
-  const title = operation.preview.action === 'install'
-    ? t('installComplete')
-    : t('uninstallComplete')
-  return (
-    <Modal
-      open
-      className="dshMarketModal dshMarketStatusModal"
-      contentClassName="dshMarketModalContent"
-      onClose={() => { if (!pending) onClose() }}
-      closeLabel={t('close')}
-      title={title}
-      description={t('restartRequiredTitle')}
-      footer={<div className="dshMarketModalActions">
-        <Button variant="ghost" disabled={pending} onClick={onClose}>{t('restartLater')}</Button>
-        <Button
-          variant="primary"
-          disabled={!canRestart || pending}
-          icon={<IconRefreshOutline16 />}
-          onClick={onRestart}
-        >{pending ? t('restarting') : t('restartNow')}</Button>
-      </div>}
-    >
-      <div className="dshMarketOperationReview">
-        <OperationFacts operation={operation.preview} showExpiry={false} t={t} />
-        <div className="dshMarketOperationSuccess" role="status">
-          <StateDot state="done" size={12} />
-          <span>{t('restartRequiredBody')}</span>
-        </div>
         {error !== undefined && <div className="dshMarketError" role="alert">{error}</div>}
       </div>
     </Modal>
@@ -1870,11 +1899,14 @@ function ItemActionModal({
   executionFailed,
   desktopActionError,
   desktopActionPending,
+  toggling,
+  toggleError,
   canOpenTerminal,
   verificationHelpHref,
   onClose,
   onConfirm,
   onOpenTerminal,
+  onToggle,
   onUninstall,
   t,
 }: {
@@ -1890,12 +1922,15 @@ function ItemActionModal({
   executionFailed: boolean
   desktopActionError?: string | undefined
   desktopActionPending: boolean
+  toggling?: string | undefined
+  toggleError?: string | undefined
   canOpenTerminal: boolean
   verificationHelpHref: string
   onClose: () => void
   onConfirm: () => void
   onOpenTerminal: () => void
-  onUninstall: (bundleId: string) => void
+  onToggle: (packageName: string, enabled: boolean) => void
+  onUninstall: (packageName: string) => void
   t: MarketSettingsTabProps['t']
 }) {
   const checking = preview === undefined && pending && operationError === undefined
@@ -1918,14 +1953,14 @@ function ItemActionModal({
     <Button
       variant="primary"
       disabled={pending}
-      icon={<IconDownloadOutline16 />}
+      icon={<IconDownloadOutlineRegular />}
       onClick={onConfirm}
     >{pending ? t('installing') : t('confirmInstall')}</Button>
   </> : <>
     {value.item.repository !== undefined && (
       <Button
         variant="outline"
-        icon={<IconRightUpOutline16 size={12} />}
+        icon={<IconRightUpOutlineRegular size={12} />}
         onClick={() => window.open(value.item.repository!.url, '_blank', 'noopener,noreferrer')}
       >{t('repository')}</Button>
     )}
@@ -1992,7 +2027,6 @@ function ItemActionModal({
                 {t('operationRiskAfterContact')}
               </span>
             </div>
-            <div className="dshMarketOperationWarning"><StateDot state="warning" size={12} /><span>{t('restartAfterOperation')}</span></div>
             {pending && <div className="dshMarketOperationProgress" role="status"><StateDot state="ongoing" size={12} />{t('installing')}</div>}
             {operationError !== undefined && <div className="dshMarketError" role="alert">{operationError}</div>}
           </div>
@@ -2018,9 +2052,12 @@ function ItemActionModal({
                 <InstallationCard
                   installation={installation}
                   operationPending={pending}
+                  toggling={toggling === installation.packageName}
+                  onToggle={onToggle}
                   onUninstall={onUninstall}
                   t={t}
                 />
+                {toggleError !== undefined && <div className="dshMarketError" role="alert">{toggleError}</div>}
               </div>
             )}
             {!inventoryLoading && inventoryError === undefined && installation === undefined && checking && (
@@ -2033,7 +2070,7 @@ function ItemActionModal({
                 <StateDot state="warning" />
                 <span>{operationError}</span>
                 <a href={verificationHelpHref} target="_blank" rel="noopener noreferrer">
-                  {t('verificationDetails')} <IconRightUpOutline16 size={12} />
+                  {t('verificationDetails')} <IconRightUpOutlineRegular size={12} />
                 </a>
               </div>
             )}

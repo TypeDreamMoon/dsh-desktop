@@ -1,25 +1,35 @@
-/** Generate the Desktop-owned Git Bash agent preset from a shipped preset. */
+/**
+ * Generate the Desktop-owned Git Bash agent preset declaration.
+ *
+ * dsh 0.1.7-alpha.1 replaced filesystem preset discovery with preset
+ * declarations carried by patch files: every shipped preset is one
+ * `@deepseek-ai/dsh-agent-preset` row inserted from
+ * `@deepseek-ai/dsh-web-app/presets/*.patch.yml`. Desktop therefore declares
+ * its own preset instead of copying a preset directory, which is also what
+ * keeps the `!!js` expressions of the shipped preset intact — the transform
+ * edits the parsed document and re-emits it rather than rebuilding rows.
+ * @module dsh-plugin-desktop/src/git-bash-preset
+ */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { isMap, isSeq, parseDocument } from 'yaml'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { isMap, isSeq, parseDocument, type Node, type YAMLSeq } from 'yaml'
 
 /** Preset id the Desktop owns and regenerates. */
 export const DESKTOP_GIT_BASH_PRESET_ID = 'git-bash'
+
+/** Loader row id carrying the generated preset declaration. */
+export const DESKTOP_GIT_BASH_PRESET_ROW_ID = 'preset-git-bash'
+
+/** Package that owns one agent preset declaration. */
+const PRESET_PACKAGE = '@deepseek-ai/dsh-agent-preset'
 
 /** Backend that runs one persistent bash shell through an explicit executable. */
 const TERMINAL_PACKAGE = '@deepseek-ai/dsh-terminal-bash'
 
 /** Model-facing tool over that backend. */
 const PERSISTENT_TOOL_PACKAGE = '@deepseek-ai/dsh-tool-bash-persistent'
-
-/**
- * Marker file recording that one preset directory is Desktop-generated.
- *
- * The generator refuses to touch a directory without it, so a user-authored
- * preset that happens to reuse the id is never silently replaced.
- */
-const PRESET_MARKER_FILE = '.dsh-desktop-generated'
 
 /**
  * Row ids the generator drops before appending its own shell rows.
@@ -30,89 +40,131 @@ const PRESET_MARKER_FILE = '.dsh-desktop-generated'
  */
 const REPLACED_ROW_IDS = new Set(['tool-pwsh', 'tool-bash', 'shell-git-bash', 'tool-bash-persistent'])
 
+/** Preset id prefix every shipped declaration inserts. */
+const PRESET_ROW_PREFIX = 'preset-'
+
+/**
+ * Order the generated preset sorts at.
+ *
+ * Shipped presets occupy 3 (minimal), 4 (cordis) and 5 (standard/ptc), so the
+ * Desktop-owned one sorts last without competing for a shipped slot.
+ */
+const PRESET_ORDER = 9
+
 /** One generated preset's identity on disk. */
 export interface GeneratedGitBashPreset {
   /** Preset id a session selects. */
   readonly id: string
-  /** Absolute preset directory. */
-  readonly directory: string
+  /** Absolute path of the overlay patch declaring it. */
+  readonly path: string
   /** Shipped preset id this generation derived from. */
   readonly source: string
 }
 
 /**
- * Build the Git Bash composition from one shipped preset's text.
- *
- * Comments and unrelated rows survive because the transform edits the parsed
- * document instead of re-emitting a hand-built row list.
- * @param source - the shipped preset composition text.
- * @param bashPath - absolute Git Bash executable the preset runs commands with.
- * @returns the composition text of the generated preset.
+ * Absolute path of one shipped preset declaration.
+ * @param presetId - shipped preset id (`minimal`, `standard`, `ptordis`, `ptc`).
+ * @param moduleUrl - module URL used to resolve the owning package.
+ * @returns the preset patch file path.
  */
-export function gitBashPresetComposition(source: string, bashPath: string): string {
-  const document = parseDocument(source, { prettyErrors: true })
+export function shippedPresetPatchPath(presetId: string, moduleUrl: string = import.meta.url): string {
+  const require = createRequire(moduleUrl)
+  const packageJson = require.resolve('@deepseek-ai/dsh-web-app/package.json') as string
+  return join(dirname(packageJson), 'presets', `${presetId}.patch.yml`)
+}
+
+/**
+ * Rewrite one shipped preset declaration into the Desktop Git Bash preset.
+ *
+ * The declaration row is renamed and re-identified, and its `plugins` sequence
+ * swaps the confined shell rows for the persistent Git Bash backend. Comments,
+ * unrelated rows, and `!!js` expressions survive because this mutates the
+ * parsed document instead of re-emitting a hand-built row list.
+ * @param sourcePatch - text of the shipped preset patch file.
+ * @param bashPath - absolute Git Bash executable the preset runs commands with.
+ * @returns the overlay patch text declaring the generated preset.
+ */
+export function gitBashPresetPatch(sourcePatch: string, bashPath: string): string {
+  const document = parseDocument(sourcePatch, { prettyErrors: true })
   if (document.errors.length > 0) {
     throw new Error(`dsh-plugin-desktop: source preset is not valid YAML: ${document.errors.map(error => error.message).join('; ')}`)
   }
   const rows = document.contents
   if (!isSeq(rows)) throw new Error('dsh-plugin-desktop: source preset must be a YAML sequence of rows')
-  for (let index = rows.items.length - 1; index >= 0; index -= 1) {
-    const row = rows.items[index]
-    if (isMap(row) && REPLACED_ROW_IDS.has(String(row.get('id')))) document.delete(index)
+  const declaration = presetDeclarationRow(rows)
+  declaration.set('id', DESKTOP_GIT_BASH_PRESET_ROW_ID)
+  declaration.set('name', PRESET_PACKAGE)
+  const config = declaration.get('config')
+  if (!isMap(config)) throw new Error('dsh-plugin-desktop: source preset declaration has no config map')
+  config.set('id', DESKTOP_GIT_BASH_PRESET_ID)
+  config.set('order', PRESET_ORDER)
+  const plugins = config.get('plugins')
+  if (!isSeq(plugins)) throw new Error('dsh-plugin-desktop: source preset declaration has no plugins sequence')
+  for (let index = plugins.items.length - 1; index >= 0; index -= 1) {
+    const row = plugins.items[index]
+    if (isMap(row) && REPLACED_ROW_IDS.has(String(row.get('id')))) plugins.delete(index)
   }
-  document.add({
+  plugins.items.push(document.createNode({
     id: 'shell-git-bash',
     name: TERMINAL_PACKAGE,
     config: { shellDialect: 'bash', shellPath: bashPath },
-  })
-  document.add({
+  }) as Node)
+  plugins.items.push(document.createNode({
     id: 'tool-bash-persistent',
     name: PERSISTENT_TOOL_PACKAGE,
-  })
+  }) as Node)
   return document.toString()
 }
 
 /**
- * Materialize the Desktop Git Bash preset under a user preset root.
+ * Find the shipped preset declaration row inside one preset patch sequence.
+ * @param rows - top-level rows of the parsed preset patch.
+ * @returns the declaration row map.
+ */
+function presetDeclarationRow(rows: YAMLSeq): import('yaml').YAMLMap {
+  for (const row of rows.items) {
+    if (!isMap(row)) continue
+    const insert = row.get('insert')
+    if (!isSeq(insert)) continue
+    for (const entry of insert.items) {
+      if (!isMap(entry)) continue
+      const id = entry.get('id')
+      if (typeof id === 'string' && id.startsWith(PRESET_ROW_PREFIX) && entry.get('name') === PRESET_PACKAGE) {
+        return entry
+      }
+    }
+  }
+  throw new Error('dsh-plugin-desktop: source preset patch declares no agent preset')
+}
+
+/**
+ * Materialize the Desktop Git Bash preset overlay patch on disk.
  *
- * Roots arrive as arguments so this module owns no preset-root policy: the
- * caller supplies the shipped root it derives from and the user root it writes
- * to. Regenerating replaces only a directory this generator owns, and a session
- * reaches the preset through the existing picker — the generator never writes
- * settings.
- * @param sourceRoot - root directory holding the shipped presets.
- * @param userRoot - user preset root the generated directory is written under.
- * @param source - shipped preset id to derive from.
+ * The caller owns the path, so this module holds no preset-root policy. A
+ * disabled or unavailable preset is removed by {@link removeGitBashPreset}
+ * instead, which keeps a stale declaration from outliving its setting.
+ * @param path - absolute overlay patch path to write.
+ * @param sourcePatch - text of the shipped preset patch to derive from.
  * @param bashPath - absolute Git Bash executable the preset runs commands with.
+ * @param source - shipped preset id, recorded in the result only.
  * @returns the generated preset's identity on disk.
  */
 export function generateGitBashPreset(
-  sourceRoot: string,
-  userRoot: string,
-  source: string,
+  path: string,
+  sourcePatch: string,
   bashPath: string,
+  source: string = 'standard',
 ): GeneratedGitBashPreset {
-  const sourceDirectory = join(sourceRoot, source)
-  const composition = join(sourceDirectory, 'agent.cordis.yml')
-  if (!existsSync(composition)) {
-    throw new Error(`dsh-plugin-desktop: shipped preset "${source}" has no composition`)
-  }
-  const directory = join(userRoot, DESKTOP_GIT_BASH_PRESET_ID)
-  if (existsSync(directory) && !existsSync(join(directory, PRESET_MARKER_FILE))) {
-    throw new Error(`dsh-plugin-desktop: preset "${DESKTOP_GIT_BASH_PRESET_ID}" already exists and was not generated by DSH Desktop`)
-  }
-  rmSync(directory, { recursive: true, force: true })
-  mkdirSync(userRoot, { recursive: true })
-  cpSync(sourceDirectory, directory, { recursive: true })
-  writeFileSync(
-    join(directory, 'agent.cordis.yml'),
-    gitBashPresetComposition(readFileSync(composition, 'utf8'), bashPath),
-  )
-  writeFileSync(join(directory, 'preset.yml'), [
-    'name: Git Bash',
-    'description: Run commands in Git Bash instead of the confined PowerShell. Requires the danger-full-access permission mode: this shell runs outside the Windows file sandbox.',
-    '',
-  ].join('\n'))
-  writeFileSync(join(directory, PRESET_MARKER_FILE), '')
-  return { id: DESKTOP_GIT_BASH_PRESET_ID, directory, source }
+  const patch = gitBashPresetPatch(sourcePatch, bashPath)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, patch)
+  return { id: DESKTOP_GIT_BASH_PRESET_ID, path, source }
+}
+
+/**
+ * Remove a previously generated preset overlay patch.
+ * @param path - absolute overlay patch path to delete.
+ */
+export function removeGitBashPreset(path: string): void {
+  rmSync(path, { force: true })
 }

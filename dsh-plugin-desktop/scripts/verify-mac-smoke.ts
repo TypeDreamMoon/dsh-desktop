@@ -5,7 +5,13 @@ import { existsSync, mkdtempSync, readdirSync, rmdirSync, statSync } from 'node:
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MACOS_UNIVERSAL_NATIVE_ENTRIES } from './mac-universal.ts'
+import {
+  MACOS_UNIVERSAL_NATIVE_ENTRIES,
+  macSmokeArchitecture,
+  macSmokeExecutableSlices,
+  type MacUniversalArch,
+} from './mac-universal.ts'
+import { verifyDesktopMacRuntime } from './verify-mac-runtime.ts'
 
 /** Injectable filesystem and command boundaries for smoke verification. */
 export interface MacSmokeVerificationOptions {
@@ -13,6 +19,8 @@ export interface MacSmokeVerificationOptions {
   readonly distDir: string
   /** Installed application name inside the mounted image. */
   readonly productName: string
+  /** Mach-O slices the main executable must contain; defaults to both CPUs. */
+  readonly executableSlices?: readonly MacUniversalArch[]
   /** Return regular DMG files in the distribution directory. */
   readonly listDmgs: (distDir: string) => readonly string[]
   /** Create a private empty mount point. */
@@ -21,6 +29,8 @@ export interface MacSmokeVerificationOptions {
   readonly run: (command: string, args: readonly string[]) => void
   /** Remove the detached empty mount point. */
   readonly removeMountPoint: (mountPoint: string) => void
+  /** Check resources beside the application, such as the bundled interpreter payloads, inside the mounted image. */
+  readonly verifyRuntime?: (appPath: string) => void
   /** Probe a physical path inside the mounted application. */
   readonly exists: (path: string) => boolean
   /** Report file metadata for a physical path inside the mounted application. */
@@ -53,10 +63,12 @@ function defaultOptions(): MacSmokeVerificationOptions {
       ? join(packageRoot, 'dist', 'mac-smoke')
       : resolve(process.argv[2]),
     productName: 'DSH Desktop',
+    executableSlices: macSmokeExecutableSlices(macSmokeArchitecture(process.env)),
     listDmgs,
     makeMountPoint: () => mkdtempSync(join(tmpdir(), 'dsh-desktop-dmg-smoke-')),
     run,
     removeMountPoint: mountPoint => rmdirSync(mountPoint),
+    verifyRuntime: appPath => verifyDesktopMacRuntime(appPath, false),
     exists: existsSync,
     stat: path => {
       const result = statSync(path)
@@ -114,8 +126,10 @@ export function verifyMacSmoke(
     ) {
       throw new Error(`packaged application has an invalid main executable: ${executablePath}`)
     }
-    options.run('lipo', [executablePath, '-verify_arch', 'x86_64'])
-    options.run('lipo', [executablePath, '-verify_arch', 'arm64'])
+    const slices = options.executableSlices ?? macSmokeExecutableSlices('universal')
+    for (const slice of slices) {
+      options.run('lipo', [executablePath, '-verify_arch', slice])
+    }
 
     const unpackedRoot = join(appPath, 'Contents', 'Resources', 'app')
     for (const entry of ['package.json', 'lib/main.js']) {
@@ -129,7 +143,7 @@ export function verifyMacSmoke(
       }
     }
 
-    for (const entry of MACOS_UNIVERSAL_NATIVE_ENTRIES) {
+    for (const entry of MACOS_UNIVERSAL_NATIVE_ENTRIES.filter(entry => slices.includes(entry.arch))) {
       const nativePath = join(unpackedRoot, entry.path)
       if (!options.exists(nativePath)) {
         throw new Error(`universal application is missing ${nativePath}`)
@@ -143,6 +157,7 @@ export function verifyMacSmoke(
       }
       options.run('lipo', [nativePath, '-verify_arch', entry.arch])
     }
+    options.verifyRuntime?.(appPath)
   } catch (cause) {
     failure = cause
   }

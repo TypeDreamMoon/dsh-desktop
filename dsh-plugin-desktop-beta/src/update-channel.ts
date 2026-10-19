@@ -2,7 +2,7 @@
  * Update-channel preference for the Desktop updater. The installed edition
  * owns the default stream; `releaseChannel` can pin the lifecycle to one
  * stream without changing which package is running.
- * @module dsh-plugin-desktop/src/update-channel
+ * @module dsh-plugin-desktop-beta/src/update-channel
  */
 
 import type { DesktopReleaseChannel } from './update-checker.ts'

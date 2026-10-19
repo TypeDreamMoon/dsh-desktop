@@ -29,7 +29,6 @@ const input: DesktopSetupWizardInput = {
   appVersion: '2.0.6-beta.1',
   profileName: 'work',
   platform: 'darwin',
-  micaSupported: false,
   mode: 'extended',
   macosMaterial: 'transparent',
   windowsMaterial: 'off',
@@ -43,6 +42,8 @@ const input: DesktopSetupWizardInput = {
     notifyOnTurnFailure: true,
     notifyOnJobCompletion: false,
     notifyOnJobFailure: true,
+    notifyOnScheduleCompletion: true,
+    notifyOnScheduleFailure: true,
   },
 }
 
@@ -230,9 +231,10 @@ describe('Setup Wizard setting pages', () => {
     expect(browser).not.toContain(copy.marketTitle)
     expect(browser).not.toContain(copy.communityMarket)
     expect(browser).not.toContain(copy.dshMarket)
+    expect(browser).not.toContain(copy.officialMarket)
   })
 
-  it('marks Community Market and LAN access as Beta features', () => {
+  it('marks Community Market and LAN access as Beta features and Custom Plugin Market as Experimental', () => {
     const market = renderStep('market')
     const browser = renderStep('browser')
     const enabledBrowser = renderStep('browser', {
@@ -243,7 +245,9 @@ describe('Setup Wizard setting pages', () => {
     })
     const communityOption = market.indexOf('for="setup-plugin-market-community-market"')
     const nextMarketOption = market.indexOf('for="setup-plugin-market-dsh-market"')
+    const officialMarketOption = market.indexOf('for="setup-plugin-market-official-market"')
     const marketBadge = market.indexOf('data-slot="badge"')
+    const experimentalBadge = market.indexOf('data-slot="badge"', marketBadge + 1)
     const lanOption = browser.indexOf('for="setup-network-exposure-lan"')
     const lanBadge = browser.indexOf('data-slot="badge"')
     const enabledLanOption = enabledBrowser.indexOf('for="setup-network-exposure-lan"')
@@ -252,12 +256,16 @@ describe('Setup Wizard setting pages', () => {
       enabledBrowser.indexOf('</label>', enabledLanOption),
     )
 
-    expect(occurrences(market, 'data-slot="badge"')).toBe(1)
+    expect(occurrences(market, 'data-slot="badge"')).toBe(2)
     expect(occurrences(browser, 'data-slot="badge"')).toBe(1)
     expect(market).toContain(copy.beta)
+    expect(market).toContain(copy.experimental)
+    expect(market).toContain(copy.officialMarket)
+    expect(market).toContain(copy.officialMarketBody)
     expect(browser).toContain(copy.beta)
     expect(marketBadge).toBeGreaterThan(communityOption)
     expect(marketBadge).toBeLessThan(nextMarketOption)
+    expect(experimentalBadge).toBeGreaterThan(officialMarketOption)
     expect(lanBadge).toBeGreaterThan(lanOption)
     expect(browser.slice(lanOption)).toContain('disabled=""')
     expect(enabledLanChoice).not.toContain('disabled=""')
@@ -280,8 +288,8 @@ describe('Setup Wizard setting pages', () => {
   it('uses the shadcn Switch component for every wizard toggle', () => {
     const notifications = renderStep('notifications')
     const browser = renderStep('browser')
-    expect(occurrences(notifications, 'data-slot="switch"')).toBe(5)
-    expect(occurrences(notifications, 'role="switch"')).toBe(5)
+    expect(occurrences(notifications, 'data-slot="switch"')).toBe(7)
+    expect(occurrences(notifications, 'role="switch"')).toBe(7)
     expect(occurrences(browser, 'data-slot="switch"')).toBe(1)
     expect(occurrences(browser, 'role="switch"')).toBe(1)
   })

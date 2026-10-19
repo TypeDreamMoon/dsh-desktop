@@ -1,29 +1,22 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-app-boot'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type {} from '@deepseek-ai/dsh-settings'
-import {
-  registerMarketRoutes,
-  registerMarketSettings,
-  type MarketDesktopPlugins,
-} from './host/routes.js'
+import type {} from '@deepseek-ai/dsh-plugin-manager'
+import type {} from '@deepseek-ai/dsh-storage-domain'
+import { registerMarketRoutes } from './host/routes.js'
+import { DeferredMarketStateStore } from './catalog/state-store.js'
 import { createRestrictedHttpClient } from './network/restricted-http.js'
 import {
   createMarketPackageVerifier,
   MarketInstallService,
-  type MarketDesktopPnpm,
-  type MarketDesktopProfile,
+  type MarketPluginManager,
 } from './install/service.js'
 
 export const name = 'community-market'
-export const inject = ['webServer', 'settings']
-
-interface DesktopProfilesCapability {
-  readonly current: MarketDesktopProfile
-}
+export const inject = ['webServer']
 
 interface DesktopActionsCapability {
-  openTerminal(): void
-  requestRestart(): Promise<void>
+  openTerminal?(): void
 }
 
 const npmRegistryHttp = createRestrictedHttpClient({
@@ -32,17 +25,39 @@ const npmRegistryHttp = createRestrictedHttpClient({
 })
 
 export function apply(ctx: Context): void {
-  const scope = registerMarketSettings(ctx)
+  // Market's routes hold this for their whole lifetime. It starts session-only
+  // and swaps itself onto durable storage if and when a storage domain appears,
+  // so market browses, adds and selects sources with or without one — without
+  // durable storage those choices simply do not survive a restart.
+  const state = new DeferredMarketStateStore(message => ctx.logger.warn(message))
   let installService: MarketInstallService | undefined
   let desktopActions: DesktopActionsCapability | undefined
-  let desktopPlugins: MarketDesktopPlugins | undefined
   const installProvider = { get: () => installService }
   const desktopActionsProvider = { get: () => desktopActions }
-  const desktopPluginsProvider = { get: () => desktopPlugins }
   ctx.effect(
-    () => registerMarketRoutes(ctx, scope, installProvider, desktopActionsProvider, desktopPluginsProvider),
+    () => registerMarketRoutes(ctx, state, installProvider, desktopActionsProvider),
     'community-market: routes',
   )
+  // Durable state is optional, so the storage domain is soft-injected like every
+  // other optional peer. The domain handle belongs to this effect: the facility
+  // only sweeps handles nobody closed.
+  ctx.inject(['storageDomain'], (storageCtx) => {
+    storageCtx.effect(async () => {
+      let close: (() => Promise<void>) | undefined
+      try {
+        // `@deepseek-ai/dsh-storage-domain` is an optional peer dependency, so
+        // the only module that imports it is loaded on demand: a market
+        // installed without it must still start.
+        const { activateMarketDurableState } = await import('./catalog/domain.js')
+        close = await activateMarketDurableState(storageCtx, state)
+      } catch (cause) {
+        ctx.logger.warn(`dsh-community-market: durable storage is unavailable; market state is session-only: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`)
+      }
+      return () => close?.()
+    }, 'community-market: durable state')
+  })
   ctx.inject(['desktopActions'], (desktopCtx) => {
     const actions = desktopCtx.get('desktopActions') as DesktopActionsCapability
     desktopCtx.effect(() => {
@@ -52,24 +67,17 @@ export function apply(ctx: Context): void {
       }
     }, 'community-market: optional desktop actions')
   })
-  ctx.inject(['desktopPlugins'], (desktopCtx) => {
-    const plugins = desktopCtx.get('desktopPlugins') as MarketDesktopPlugins
-    desktopCtx.effect(() => {
-      desktopPlugins = plugins
-      return () => {
-        if (desktopPlugins === plugins) desktopPlugins = undefined
-      }
-    }, 'community-market: optional desktop plugin management')
-  })
-  // Browsing remains portable. Desktop-only package operations appear whenever
-  // the narrow profile and package-manager capabilities are live.
-  ctx.inject(['desktopProfiles', 'desktopPnpm'], (desktopCtx) => {
-    const profiles = desktopCtx.get('desktopProfiles') as DesktopProfilesCapability
-    const pnpm = desktopCtx.get('desktopPnpm') as MarketDesktopPnpm
-    desktopCtx.effect(() => {
+  // Browsing remains portable. Package operations appear whenever the official
+  // plugin manager and the profile it manages are live: the Market only verifies
+  // catalog identity and delegates every install, enable, disable and removal.
+  ctx.inject(['pluginManager', 'profileContext'], (managedCtx) => {
+    const manager: MarketPluginManager | undefined = managedCtx.get('pluginManager')
+    const profile = managedCtx.get('profileContext')
+    if (manager === undefined || profile === undefined) return
+    managedCtx.effect(() => {
       const service = new MarketInstallService(
-        () => profiles.current,
-        pnpm,
+        () => ({ name: profile.name, dir: profile.dir }),
+        manager,
         createMarketPackageVerifier(npmRegistryHttp),
         {
           logFailure: message => ctx.logger.error(message),
@@ -80,7 +88,7 @@ export function apply(ctx: Context): void {
         if (installService === service) installService = undefined
         service.dispose()
       }
-    }, 'community-market: desktop package operations')
+    }, 'community-market: official plugin manager operations')
   })
 }
 

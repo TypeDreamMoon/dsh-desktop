@@ -1,12 +1,12 @@
 /**
- * Release source selection for the Desktop updater: the official DSH Desktop
+ * Release source selection for the Desktop updater: the official DSH Desktop Beta
  * version service, the upstream anywhere-labs GitHub Releases, or this fork's
  * own GitHub Releases. Fork maintainers can point the updater at either
  * repository without changing the shipped default.
- * @module dsh-plugin-desktop/src/update-source
+ * @module dsh-plugin-desktop-beta/src/update-source
  */
 
-/** Official DSH Desktop release service. */
+/** Official DSH Desktop Beta release service. */
 export const OFFICIAL_UPDATE_SOURCE = Object.freeze({ kind: 'official' } as const)
 
 /** GitHub repository behind the `fork` source alias. */
@@ -33,7 +33,7 @@ const SOURCE_ALIASES: Readonly<Record<string, DesktopUpdateSource>> = Object.fre
 
 /**
  * Parse the `releaseSource` config value:
- * - empty or `official` selects the DSH Desktop release service;
+ * - empty or `official` selects the DSH Desktop Beta release service;
  * - `fork` selects this fork's GitHub Releases;
  * - `upstream` selects the upstream anywhere-labs GitHub Releases;
  * - `github:<owner>/<repo>` selects any other repository's Releases.

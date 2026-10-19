@@ -10,12 +10,18 @@ export interface DesktopNativeCopy {
   readonly missingPluginError: string
   readonly failedPlugins: string
   readonly pluginRecoveryInstructions: string
+  readonly hostStoppedTitle: string
+  readonly hostStoppedMessage: string
+  readonly hostStoppedDetail: (exitCode: string) => string
+  readonly hostStoppedInstructions: string
   readonly openTerminal: string
   readonly restart: string
   readonly dismiss: string
   readonly updateAvailableTitle: string
   readonly updateAvailableMessage: (version: string) => string
   readonly downloadUpdate: string
+  readonly installNext: string
+  readonly macNextInstallInstructions: string
   readonly installStableAlongsideBeta: string
   readonly download: string
   readonly later: string
@@ -85,12 +91,18 @@ const COPY: Record<DesktopLocale, DesktopNativeCopy> = {
     missingPluginError: 'The plugin loader did not provide an error message.',
     failedPlugins: 'Plugins that failed to load:',
     pluginRecoveryInstructions: 'Update or uninstall the failed third-party plugins in DSH Terminal, then restart the app.',
+    hostStoppedTitle: 'DSH Host Stopped',
+    hostStoppedMessage: 'The background service that runs your conversations has stopped.',
+    hostStoppedDetail: exitCode => `Exit code: ${exitCode}`,
+    hostStoppedInstructions: 'Open windows can no longer reach it, and no work is lost on disk. Restart DSH Desktop to reconnect, or open DSH Terminal to inspect the logs first.',
     openTerminal: 'Open DSH Terminal',
     restart: 'Restart DSH Desktop',
     dismiss: 'Dismiss',
     updateAvailableTitle: 'DSH Desktop Update Available',
     updateAvailableMessage: version => `DSH Desktop ${version} is available.`,
     downloadUpdate: 'Download this update now?',
+    installNext: 'Download DSH NEXT, the successor to the current stable desktop app? It installs as a separate app.',
+    macNextInstallInstructions: 'The disk image has opened. Drag DSH NEXT into Applications, then open DSH NEXT.',
     installStableAlongsideBeta: 'Install the stable edition alongside DSH Desktop Beta? The Beta app will remain installed.',
     download: 'Download',
     later: 'Later',
@@ -158,12 +170,18 @@ const COPY: Record<DesktopLocale, DesktopNativeCopy> = {
     missingPluginError: '插件加载器没有提供错误信息。',
     failedPlugins: '加载失败的插件：',
     pluginRecoveryInstructions: '请在 DSH 终端中更新或卸载加载失败的第三方插件，然后重启应用。',
+    hostStoppedTitle: 'DSH Host 已停止',
+    hostStoppedMessage: '运行会话的后台服务已停止。',
+    hostStoppedDetail: exitCode => `退出码：${exitCode}`,
+    hostStoppedInstructions: '已打开的窗口无法再与它通信，磁盘上的内容不会丢失。重启 DSH Desktop 即可重新连接；也可以先打开 DSH 终端查看日志。',
     openTerminal: '打开 DSH 终端',
     restart: '重启 DSH Desktop',
     dismiss: '关闭',
     updateAvailableTitle: 'DSH Desktop 有可用更新',
     updateAvailableMessage: version => `DSH Desktop ${version} 已可用。`,
     downloadUpdate: '现在下载此更新？',
+    installNext: '是否下载 DSH NEXT？它将接替当前稳定版桌面端，将作为独立应用安装。',
+    macNextInstallInstructions: '磁盘映像已打开。请将 DSH NEXT 拖入“应用程序”，然后打开 DSH NEXT。',
     installStableAlongsideBeta: '是否同时安装稳定版？DSH Desktop Beta 将继续保留。',
     download: '下载',
     later: '稍后',

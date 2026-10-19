@@ -109,7 +109,11 @@ async function createHarness(options: {
   } as unknown as DesktopRuntime
   const ctx = {
     desktopRuntime: runtime,
-    settings: { get: () => options.desktopSettings ?? {} },
+    // dsh 0.1.7 projects the composed configuration through `SettingsForms`,
+    // so the Desktop section arrives from `describe()` by its entry id.
+    settings: {
+      describe: () => [{ ns: 'dsh-desktop', value: options.desktopSettings ?? {} }],
+    },
     webServer: {
       port: 43120,
       register: (registered: WebRoute) => {

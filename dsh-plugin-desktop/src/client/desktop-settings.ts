@@ -2,26 +2,41 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { DesktopSettingsSection, type DesktopNotificationSettings, type DesktopShellExecutorSettings, type DesktopShellSettings } from './DesktopSettingsSection.tsx'
 import { DesktopTerminalSettingsAction } from './DesktopTerminalSettingsAction.tsx'
 import { createDesktopSettingsApi } from './desktop-settings-api.ts'
 import { en, zh, type DesktopSettingsLocaleKey } from './desktop-settings-locales.ts'
 import { installDesktopSettingsStyles } from './desktop-settings-styles.ts'
 import type { DesktopClientEnvironment } from './environment.ts'
+import { COMMUNITY_MARKET, DSH_MARKET, REMOTE_CONTROL_BUNDLE } from './market-toggle.ts'
+import { installPluginControlsStyles } from './plugin-controls-styles.ts'
+import {
+  bindDesktopSettingsForm,
+  DESKTOP_NOTIFICATIONS_SETTINGS_NAMESPACE,
+  DESKTOP_SHELL_SETTINGS_NAMESPACE,
+  type DesktopSettingsForm,
+} from './settings-bridge.ts'
 
 /** Locale namespace owned by the Desktop settings page. */
 export const DESKTOP_SETTINGS_LOCALE_NAMESPACE = 'desktop.settings'
 
-/** Host settings namespaces bound through the standard client settings service. */
-export const DESKTOP_SHELL_SETTINGS_NAMESPACE = 'dsh-desktop'
-export const DESKTOP_NOTIFICATIONS_SETTINGS_NAMESPACE = 'dsh-desktop-notifications'
 /**
- * Namespace of the shared shell capability. Spelled here rather than imported:
- * a client package must not depend on a Host package, and the executor families
- * that own it spell the same value.
+ * Host entry id of the Desktop-adapted Windows PowerShell executor.
+ *
+ * The launcher generation swaps the upstream `pwsh-sandbox` row for this one so
+ * ACL launches can be adapted; its document carries the executable choice this
+ * page edits. Spelled here rather than imported from the Host package: a client
+ * package must not depend on a Host package.
  */
-export const SHELL_SETTINGS_NAMESPACE = 'shell'
+export const DESKTOP_PWSH_SETTINGS_NAMESPACE = 'desktop-windows-pwsh-sandbox'
+
+/**
+ * Host settings namespaces bound through the standard client settings service.
+ * The two channels' cores address a settings document differently, so the ids
+ * themselves are edition-local; see `src/client/settings-bridge.ts`.
+ */
+export { DESKTOP_NOTIFICATIONS_SETTINGS_NAMESPACE, DESKTOP_SHELL_SETTINGS_NAMESPACE } from './settings-bridge.ts'
 
 /** Shared client controls consumed by settings and Desktop-owned window chrome. */
 export interface DesktopSettingsClientControl {
@@ -35,7 +50,7 @@ export interface DesktopSettingsClientControl {
  * access in ordered writes; the Host compares only effective generation state.
  */
 export async function persistDesktopModeSelection(
-  desktopSettings: Pick<SettingsScope<DesktopShellSettings>, 'set'>,
+  desktopSettings: Pick<DesktopSettingsForm<DesktopShellSettings>, 'set'>,
   mode: DesktopShellSettings['mode'],
 ): Promise<void> {
   if (mode === 'compatibility') {
@@ -64,15 +79,18 @@ export function applyDesktopSettings(
   ctx: ClientContext,
   environment: DesktopClientEnvironment,
 ): DesktopSettingsClientControl {
-  const desktopSettings = ctx.settingsScope.bind<DesktopShellSettings>({
-    namespace: DESKTOP_SHELL_SETTINGS_NAMESPACE,
-  })
-  const notificationSettings = ctx.settingsScope.bind<DesktopNotificationSettings>({
-    namespace: DESKTOP_NOTIFICATIONS_SETTINGS_NAMESPACE,
-  })
-  const shellSettings = ctx.settingsScope.bind<DesktopShellExecutorSettings>({
-    namespace: SHELL_SETTINGS_NAMESPACE,
-  })
+  const desktopSettings = bindDesktopSettingsForm<DesktopShellSettings>(
+    ctx,
+    DESKTOP_SHELL_SETTINGS_NAMESPACE,
+  )
+  const notificationSettings = bindDesktopSettingsForm<DesktopNotificationSettings>(
+    ctx,
+    DESKTOP_NOTIFICATIONS_SETTINGS_NAMESPACE,
+  )
+  const shellSettings = bindDesktopSettingsForm<DesktopShellExecutorSettings>(
+    ctx,
+    DESKTOP_PWSH_SETTINGS_NAMESPACE,
+  )
   const api = createDesktopSettingsApi()
   const t = ctx.locale.bind(DESKTOP_SETTINGS_LOCALE_NAMESPACE)
   const setMode = async (mode: DesktopShellSettings['mode']): Promise<void> => {
@@ -87,6 +105,10 @@ export function applyDesktopSettings(
     () => installDesktopSettingsStyles(),
     'dsh-plugin-desktop: settings styles',
   )
+  ctx.effect(
+    () => installPluginControlsStyles(),
+    'dsh-plugin-desktop: plugin controls styles',
+  )
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'desktop',
@@ -96,12 +118,17 @@ export function applyDesktopSettings(
     inject: () => ({
       api,
       platform: environment.platform,
+      version: environment.version,
       initialMode: environment.mode,
-      micaSupported: environment.micaSupported,
       setMode,
       desktopSettings,
       notificationSettings,
       shellSettings,
+      capabilities: { pluginSelectors: false },
+      openPlugins: () => {
+        const layout = ctx.reflect?.get('layout', false) as { selectPanel?(id: string): void } | undefined
+        layout?.selectPanel?.('plugins')
+      },
     }),
   }, DesktopSettingsSection))
   ctx.slots.inject('settings.action', () => ctx.slots.register({
@@ -111,6 +138,19 @@ export function applyDesktopSettings(
     locale: DESKTOP_SETTINGS_LOCALE_NAMESPACE,
     inject: () => ({ api }),
   }, DesktopTerminalSettingsAction))
+
+  // The Plugins overview owns built-in Market and Remote Control selection.
+  // Their bundles must not expose duplicate switches in the generic plugin list.
+  ctx.slots.inject('plugins.bundle.hidden', () => {
+    const disposers = [COMMUNITY_MARKET, DSH_MARKET, REMOTE_CONTROL_BUNDLE].map(key =>
+      ctx.slots.register({
+        name: 'plugins.bundle.hidden',
+        key,
+      }, () => null))
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  })
 
   return Object.freeze({
     api,

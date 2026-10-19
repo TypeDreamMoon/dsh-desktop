@@ -1,7 +1,7 @@
 /** Build a signed and notarized macOS DMG from validated release credentials. */
 
 import { spawnSync } from 'node:child_process'
-import { rmSync } from 'node:fs'
+import { readFileSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -12,6 +12,8 @@ import {
 import { prepareInstalledMacUniversalRuntime } from './mac-universal.ts'
 import { prepareFsExtForElectron } from './prepare-fs-ext.ts'
 import { electronBuilderEnvironment } from './electron-builder-environment.ts'
+import { desktopRuntimeTargets, prepareDesktopInterpreters, primaryRuntimeDirectory, verifyPreparedDesktopRuntime } from './prepare-runtime.ts'
+import { signMacRuntime, withMacSigningIdentity } from './sign-runtime.ts'
 
 /** Injectable release boundary used by focused tests. */
 export interface MacReleaseOptions {
@@ -76,6 +78,7 @@ function defaultReleaseOptions(): MacReleaseOptions {
       prepareFsExtForElectron({ platform: 'darwin', arch: 'arm64', desktopRoot })
       prepareFsExtForElectron({ platform: 'darwin', arch: 'x64', desktopRoot })
       prepareInstalledMacUniversalRuntime(desktopRoot)
+      verifyPreparedDesktopRuntime(desktopRoot, 'darwin')
     },
   }
 }
@@ -98,6 +101,13 @@ export function releaseMac(options: MacReleaseOptions = defaultReleaseOptions())
 
   // The workspace check includes the package build and repository-layout gate. Signing
   // material is withheld from every build, test, Loader smoke, and layout subprocess.
+  options.run(
+    process.execPath,
+    ['scripts/prepare-agents-anywhere-release.mjs', '--verify-release'],
+    resolve(options.desktopRoot, '..'),
+    buildEnvironment,
+  )
+  options.run(process.execPath, ['scripts/prepare-dsh-market.mjs', '--check'], resolve(options.desktopRoot, '..'), buildEnvironment)
   options.run('yarn', ['run', 'check'], resolve(options.desktopRoot, '..'), buildEnvironment)
   options.resetOutput()
   options.prepareRuntime()
@@ -118,6 +128,25 @@ export function releaseMac(options: MacReleaseOptions = defaultReleaseOptions())
 const invokedPath = process.argv[1]
 if (invokedPath !== undefined && resolve(invokedPath) === fileURLToPath(import.meta.url)) {
   try {
+    const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+    // The preflight the release flow repeats; the payload signatures must carry the identity it selects.
+    const releaseEnvironment = adaptMacReleaseEnvironment(process.env)
+    const ready = assertMacReleaseReady({
+      env: releaseEnvironment,
+      platform: process.platform,
+      listCodeSigningIdentities: () => listCodeSigningIdentities(withoutMacReleaseSecrets(releaseEnvironment)),
+    })
+    const appId = (JSON.parse(readFileSync(resolve(desktopRoot, 'package.json'), 'utf8')) as { build: { appId: string } }).build.appId
+    // Like upstream Desktop, every Mach-O payload file is signed before electron-builder runs; osx-sign would leave the Python extension modules unsigned.
+    await prepareDesktopInterpreters({
+      desktopRoot,
+      sign: runtimeRoot => withMacSigningIdentity(releaseEnvironment, ready.identity, async (signer) => {
+        for (const { arch } of desktopRuntimeTargets('darwin')) {
+          const signed = await signMacRuntime(primaryRuntimeDirectory(runtimeRoot, arch), appId, signer, arch)
+          console.log(`Signed ${String(signed)} native files of the ${arch} primary runtime as ${ready.identity}`)
+        }
+      }),
+    })
     releaseMac()
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
