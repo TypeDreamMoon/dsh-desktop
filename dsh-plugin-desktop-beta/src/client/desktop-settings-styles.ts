@@ -3,7 +3,26 @@ import { DESKTOP_PACKAGE_NAME } from '../product-identity.ts'
 
 const STYLE_ID = 'dsh-desktop-settings-styles'
 
+/**
+ * Attribute that expands the settings panel to the whole window.
+ *
+ * The panel is upstream `ui-settings-general` chrome sized to a fixed 800x800,
+ * so the expansion keys off that shell's stable `data-shortcut-modal="settings"`
+ * hook rather than a hashed CSS-module class. The safe-area margins the panel
+ * already respects are kept: only its fixed caps are lifted, which also keeps
+ * the panel clear of the custom title bar in the Desktop frame.
+ */
+export const DESKTOP_SETTINGS_FULLSCREEN_ATTRIBUTE = 'data-dsh-desktop-settings-fullscreen'
+
 const CSS = `
+html[${DESKTOP_SETTINGS_FULLSCREEN_ATTRIBUTE}] [data-shortcut-modal="settings"] {
+  width: calc(100vw - 2 * max(24px, var(--dsh-frame-top-clearance, 24px)));
+  max-width: none;
+  height: calc(100vh - 2 * max(24px, var(--dsh-frame-top-clearance, 24px)));
+}
+html[${DESKTOP_SETTINGS_FULLSCREEN_ATTRIBUTE}] .dshDesktopSettings {
+  width: 100%;
+}
 .dshDesktopSettings {
   display: flex;
   flex-direction: column;

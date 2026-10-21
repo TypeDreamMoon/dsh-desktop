@@ -25,6 +25,7 @@ import {
   readDesktopSettingsUntilLanSettled,
   resolveDesktopLanConfirmation,
 } from '../src/client/DesktopSettingsSection.tsx'
+import { DesktopSettingsFullscreenAction } from '../src/client/DesktopSettingsFullscreenAction.tsx'
 import { DesktopTerminalSettingsAction } from '../src/client/DesktopTerminalSettingsAction.tsx'
 import {
   createDesktopSettingsApi,
@@ -747,16 +748,29 @@ describe('Desktop settings Slot registration', () => {
     })
     expect(actionOptions.inject()).toHaveProperty('api')
     expect(actionComponent).toBe(DesktopTerminalSettingsAction)
+    // The fullscreen toggle is the second header action, so it follows the
+    // terminal action and precedes the bundle-hidden registrations.
+    const [fullscreenOptions, fullscreenComponent] = register.mock.calls[2] as unknown as [
+      { id: string; order: number; locale: string },
+      unknown,
+    ]
+    expect(fullscreenOptions).toMatchObject({
+      name: 'settings.action',
+      id: 'toggle-desktop-settings-fullscreen',
+      order: 2,
+      locale: DESKTOP_SETTINGS_LOCALE_NAMESPACE,
+    })
+    expect(fullscreenComponent).toBe(DesktopSettingsFullscreenAction)
     expect(inject).toHaveBeenCalledWith('plugins.bundle.hidden', expect.any(Function))
-    expect(register).toHaveBeenNthCalledWith(3, {
+    expect(register).toHaveBeenNthCalledWith(4, {
       name: 'plugins.bundle.hidden',
       key: 'dsh-community-market',
     }, expect.any(Function))
-    expect(register).toHaveBeenNthCalledWith(4, {
+    expect(register).toHaveBeenNthCalledWith(5, {
       name: 'plugins.bundle.hidden',
       key: 'dshmarket',
     }, expect.any(Function))
-    expect(register).toHaveBeenNthCalledWith(5, {
+    expect(register).toHaveBeenNthCalledWith(6, {
       name: 'plugins.bundle.hidden',
       key: '@agents-anywhere/dsh-bridge-next',
     }, expect.any(Function))

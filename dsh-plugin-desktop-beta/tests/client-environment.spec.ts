@@ -55,7 +55,8 @@ describe('desktop client environment', () => {
     try {
       apply(ctx)
       expect(inject.mock.calls.map(([name]) => name)).toEqual([
-        'settings.section', 'settings.action', 'plugins.bundle.hidden',
+        // Two header actions: the terminal launcher and the panel-wide fullscreen toggle.
+        'settings.section', 'settings.action', 'settings.action', 'plugins.bundle.hidden',
       ])
       expect(effect.mock.calls.map(([, label]) => label)).not.toContain('desktop: independent compatibility frame styles')
     } finally {

@@ -3,6 +3,7 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import { DesktopSettingsFullscreenAction } from './DesktopSettingsFullscreenAction.tsx'
 import { DesktopSettingsSection, type DesktopNotificationSettings, type DesktopShellExecutorSettings, type DesktopShellSettings } from './DesktopSettingsSection.tsx'
 import { DesktopTerminalSettingsAction } from './DesktopTerminalSettingsAction.tsx'
 import { createDesktopSettingsApi } from './desktop-settings-api.ts'
@@ -138,6 +139,14 @@ export function applyDesktopSettings(
     locale: DESKTOP_SETTINGS_LOCALE_NAMESPACE,
     inject: () => ({ api }),
   }, DesktopTerminalSettingsAction))
+  // Panel-level control, so it lives in the shared header and stays available on
+  // every settings page rather than only on the Desktop page.
+  ctx.slots.inject('settings.action', () => ctx.slots.register({
+    name: 'settings.action',
+    id: 'toggle-desktop-settings-fullscreen',
+    order: 2,
+    locale: DESKTOP_SETTINGS_LOCALE_NAMESPACE,
+  }, DesktopSettingsFullscreenAction))
 
   // The Plugins overview owns built-in Market and Remote Control selection.
   // Their bundles must not expose duplicate switches in the generic plugin list.
