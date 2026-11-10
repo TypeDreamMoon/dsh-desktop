@@ -150,7 +150,7 @@ function Action({ action, children, className, icon, id, name, path, variant = '
   readonly children: ReactNode
   readonly className?: string
   readonly icon?: ReactNode
-  readonly id?: string
+  readonly id?: string | undefined
   readonly name?: string
   readonly path?: string
   readonly variant?: RecoveryActionVariant
