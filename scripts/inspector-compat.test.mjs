@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { runInNewContext } from 'node:vm'
 
-// `check:layout` also runs in CI jobs that never install dependencies (upstream-command-windows).
+// `check:layout` can run before dependencies are installed.
 // Without an install there is neither TypeScript nor the inspector package to read, so skip there.
 function loadTypeScript() {
   try {
@@ -29,11 +29,18 @@ function nodes(file, predicate) {
   return matches
 }
 
-for (const workspace of ['dsh-plugin-desktop', 'dsh-plugin-desktop-beta', 'dsh-desktop-next']) {
+// Each workspace follows its own upstream.json channel runtime.
+const workspaceVersions = {
+  'dsh-plugin-desktop': '0.2.1-rc.3',
+  'dsh-plugin-desktop-beta': '0.2.2-rc.1',
+  'dsh-desktop-next': '0.2.2-rc.1',
+}
+
+for (const [workspace, version] of Object.entries(workspaceVersions)) {
   test(`${workspace}: official Reload DevTools completes through the hosted embedder callback`, { skip }, () => {
     const require = createRequire(resolve(workspace, 'package.json'))
     const manifest = require.resolve('@deepseek-ai/dsh-experimental-inspector/package.json')
-    assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).version, '0.2.1-rc.2')
+    assert.equal(JSON.parse(readFileSync(manifest, 'utf8')).version, version)
     const directory = join(dirname(manifest), 'lib/devtools/chunks')
     const parse = (prefix, marker) => {
       const files = readdirSync(directory).filter(name => name.startsWith(prefix + '-') && name.endsWith('.js')

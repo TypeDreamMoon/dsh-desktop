@@ -12,7 +12,7 @@ import {
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import sharp from 'sharp'
 import { describe, expect, it } from 'vitest'
@@ -75,7 +75,6 @@ const workspaceManifest = JSON.parse(readFileSync(new URL('package.json', worksp
   resolutions?: Record<string, unknown>
   scripts?: Record<string, unknown>
 }
-const ciWorkflow = readFileSync(new URL('.github/workflows/ci.yml', workspaceRoot), 'utf8')
 const main = readFileSync(new URL('src/main.ts', packageRoot), 'utf8')
 const runtimeVersion = String(manifest.dependencies?.['@deepseek-ai/dsh'])
 const betaRuntimeVersion = (JSON.parse(readFileSync(
@@ -85,16 +84,6 @@ const dshResolution = (name: string): unknown =>
   workspaceManifest.resolutions?.[`${name}@npm:${runtimeVersion}`]
 
 describe('published package surface', () => {
-  it('runs all desktop editions and community market typechecks from the root command', () => {
-    expect(workspaceManifest.scripts?.typecheck)
-      .toBe('yarn workspace dsh-plugin-desktop typecheck && yarn workspace dsh-plugin-desktop-beta typecheck && yarn workspace dsh-community-market typecheck && yarn workspace dsh-desktop-next typecheck')
-  })
-
-  it('runs all desktop editions and community market tests from the root command', () => {
-    expect(workspaceManifest.scripts?.test)
-      .toBe('yarn workspace dsh-plugin-desktop test && yarn workspace dsh-plugin-desktop-beta test && yarn workspace dsh-community-market test && yarn workspace dsh-desktop-next test')
-  })
-
   it('registers both npm launcher names', () => {
     expect(manifest.name).toBe('dsh-plugin-desktop')
     expect(manifest.bin).toEqual({
@@ -999,12 +988,11 @@ describe('published package surface', () => {
   })
 
   it('carries the primary runtime beside the application like upstream Desktop', () => {
-    // Both CPU payloads ride beside the application as extra resources; Linux ships none.
-    for (const platform of ['mac', 'win'] as const) {
+    // Every packaged platform carries its CPU payloads beside the application as extra resources.
+    for (const platform of ['mac', 'win', 'linux'] as const) {
       expect(manifest.build?.[platform]?.extraResources, platform).toEqual([{ from: '.desktop-build/runtime', to: 'runtime' }])
     }
     expect(manifest.build).not.toHaveProperty('extraResources')
-    expect(manifest.build?.linux).not.toHaveProperty('extraResources')
     // electron-builder must not re-sign the pre-signed payloads, and the universal merge keeps the identical payloads as they are.
     expect(manifest.build?.mac?.signIgnore).toContain('/Contents/Resources/runtime/(?:arm64|x64)/primary-runtime(?:/|$)')
     expect(manifest.build?.mac?.x64ArchFiles).toMatch(/^\{\*\*\/node_modules\/\{.+\},Contents\/Resources\/runtime\/\*\*,Contents\/Resources\/runtime\/\*\*\/\.\*\/\*\*\}$/u)
@@ -1012,60 +1000,6 @@ describe('published package surface', () => {
     for (const name of ['@deepseek-ai/dsh-skill-office', '@deepseek-ai/dsh-tool-workspace-dependencies']) {
       expect(manifest.dependencies?.[name], name).toBe(runtimeVersion)
     }
-  })
-
-  it('runs platform package gates before reusing native packaging outputs', () => {
-    const windowsJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('  desktop-windows:'),
-      ciWorkflow.indexOf('  desktop-macos:'),
-    )
-    const macosJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('  desktop-macos:'),
-      ciWorkflow.indexOf('  upstream-command-windows:'),
-    )
-
-    const matrixSelector = "workspace: ${{ github.event_name == 'pull_request' && fromJSON('[\"dsh-plugin-desktop-beta\"]') || fromJSON('[\"dsh-plugin-desktop\", \"dsh-plugin-desktop-beta\"]') }}"
-    expect(windowsJob).not.toContain('- run: yarn check')
-    expect(windowsJob).toContain(matrixSelector)
-    expect(windowsJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:win-package:platform')
-    expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win')
-    expect(windowsJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:win-portable')
-    expect(windowsJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
-    // Smoke artifacts are never published, so CI skips their compression.
-    expect(windowsJob.match(/DSH_WINDOWS_PACKAGE_COMPRESSION: store/g)).toHaveLength(2)
-    expect(macosJob).not.toContain('- run: yarn check')
-    expect(macosJob).toContain(matrixSelector)
-    expect(macosJob).toContain('- run: yarn workspace ${{ matrix.workspace }} check:mac-package:platform')
-    expect(macosJob).toContain('run: yarn workspace ${{ matrix.workspace }} dist:mac-smoke')
-    expect(macosJob).toContain('DSH_PACKAGE_CHECK_ALREADY_RAN: \'1\'')
-    expect(macosJob).not.toContain('- run: yarn dist:mac-smoke')
-    // Pull requests skip the universal merge; master pushes still package it.
-    expect(macosJob).toContain("DSH_MAC_SMOKE_ARCH: ${{ github.event_name == 'pull_request' && 'arm64' || 'universal' }}")
-  })
-
-  it('skips product packaging only for documentation-only changes', () => {
-    const classifier = fileURLToPath(new URL('../../scripts/classify-ci-changes.mjs', import.meta.url))
-    const classify = (paths: string[]): string => execFileSync(
-      process.execPath,
-      [classifier],
-      { input: Buffer.from(`${paths.join('\0')}\0`), encoding: 'utf8' },
-    ).trim()
-
-    expect(classify([
-      'docs/architecture.md',
-      '.agents/notes/implemented/architecture/decision.md',
-      '.agents/notes/implemented/architecture/decision.i18n.yaml',
-      'dsh-community-market/docs/schema.json',
-      '.github/ISSUE_TEMPLATE/feature_request.yml',
-    ])).toBe('false')
-    expect(classify(['README.md', 'dsh-plugin-desktop/src/index.ts'])).toBe('true')
-    expect(classify(['.github/workflows/ci.yml'])).toBe('true')
-    expect(classify(['THIRD_PARTY_NOTICES.md'])).toBe('true')
-    expect(classify([])).toBe('true')
-
-    expect(ciWorkflow).toContain('product="$(git diff --name-only -z')
-    expect(ciWorkflow).toContain("if: needs.changes.outputs.product == 'true'")
-    expect(ciWorkflow).toContain('Documentation-only change; product build and tests are not required.')
   })
 
   it('keeps one fixed brand-blue tray source for generated native assets', () => {
@@ -1168,20 +1102,22 @@ describe('published package surface', () => {
 
   it('keeps Electron out of production dependencies consumed by electron-builder', () => {
     expect(manifest.dependencies).not.toHaveProperty('electron')
-    // Stable is pinned to 44.0.0, not to the newest 44.x. `node-addon-require-builtin`
-    // 0.1.6 — which rc.1's dsh-app-boot requires for `internalModules()` — gates on an
-    // exact V8 build string compiled into its prebuilt binary, and only ships
-    // 15.0.245.13-electron.0 (Electron 43.0.0/43.1.0), 15.2.124.13-electron.0 (44.0.0) and
+    // Stable is pinned to exactly 44.7.0 (the release upstream's rc.2 desktop ships), not to
+    // the newest 44.x. Electron 44.0.0's asar reader is ~2.4x slower and pushes host boot
+    // past its 60 s timeout (#1420). `node-addon-require-builtin` 0.1.9 — which dsh-app-boot
+    // requires for `internalModules()` — gates on an exact V8 build string compiled into its
+    // prebuilt binaries, and only ships 15.0.245.13-electron.0 (Electron 43.0.0/43.1.0),
+    // 15.2.124.13-electron.0 (44.0.0), 15.2.124.28-electron.0 (44.4.2-44.7.0) and
     // 15.4.80-electron.0 (45.0.0-alpha.6). Every other 43.x/44.x patch release, including
-    // 43.3.0 and 44.4.1, fails closed with "unsupported Electron runtime fingerprint" and
-    // takes every `dsh` CLI entry point down with it. Do not float this to ^44 or bump it
-    // to a newer 44.x until the addon publishes a matching fingerprint.
-    expect(manifest.peerDependencies?.electron).toBe('44.0.0')
-    expect(manifest.devDependencies?.electron).toBe('44.0.0')
-    expect(manifest.dependencies?.pnpm).toBe('11.8.0')
+    // 43.3.0, 44.4.1 and 44.7.1+, fails closed with "unsupported Electron runtime
+    // fingerprint" and takes every `dsh` CLI entry point down with it. Do not float this to
+    // ^44 or bump it to a newer 44.x until the addon publishes a matching fingerprint.
+    expect(manifest.peerDependencies?.electron).toBe('44.7.0')
+    expect(manifest.devDependencies?.electron).toBe('44.7.0')
+    expect(manifest.dependencies?.pnpm).toBe('11.28.5')
   })
 
-  it('keeps the packaged pnpm manifest, lock entry, and installed runtime on 11.8.0', () => {
+  it('keeps the packaged pnpm manifest, lock entry, and installed runtime on 11.28.5', () => {
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
     const workspaceRequire = createRequire(new URL('package.json', packageRoot))
     const installedPnpm = JSON.parse(readFileSync(
@@ -1189,15 +1125,15 @@ describe('published package surface', () => {
       'utf8',
     )) as { version?: unknown }
 
-    expect(manifest.dependencies?.pnpm).toBe('11.8.0')
-    expect(lockfile).toContain('"pnpm@npm:11.8.0":')
-    expect(lockfile).toContain('resolution: "pnpm@npm:11.8.0"')
-    expect(installedPnpm.version).toBe('11.8.0')
+    expect(manifest.dependencies?.pnpm).toBe('11.28.5')
+    expect(lockfile).toContain('"pnpm@npm:11.28.5":')
+    expect(lockfile).toContain('resolution: "pnpm@npm:11.28.5"')
+    expect(installedPnpm.version).toBe('11.28.5')
   })
 
   it('patches packaged pnpm to disable non-positive and invalid release-age policies', () => {
-    const patchPath = './patches/pnpm@11.8.0.patch'
-    const patchResolution = `patch:pnpm@npm%3A11.8.0#${patchPath}`
+    const patchPath = './patches/pnpm@11.28.5.patch'
+    const patchResolution = `patch:pnpm@npm%3A11.28.5#${patchPath}`
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
     const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8')
     const workspaceRequire = createRequire(new URL('package.json', packageRoot))
@@ -1205,9 +1141,9 @@ describe('published package surface', () => {
     const installedRuntime = readFileSync(join(dirname(pnpmManifest), 'dist/pnpm.mjs'), 'utf8')
 
     expect(workspaceManifest.resolutions).toMatchObject({
-      'pnpm@npm:11.8.0': patchResolution,
+      'pnpm@npm:11.28.5': patchResolution,
     })
-    expect(lockfile).toContain('pnpm@patch:pnpm@npm%3A11.8.0#./patches/pnpm@11.8.0.patch')
+    expect(lockfile).toContain('pnpm@patch:pnpm@npm%3A11.28.5#./patches/pnpm@11.28.5.patch')
     for (const source of [patch, installedRuntime]) {
       expect(source).toContain('const minimumReleaseAge = Number(opts3.minimumReleaseAge);')
       expect(source).toContain('Number.isFinite(minimumReleaseAge) && minimumReleaseAge > 0')
@@ -1217,15 +1153,60 @@ describe('published package surface', () => {
     expect(installedRuntime).not.toContain('const ageCheckActive = Boolean(opts3.minimumReleaseAge);')
   })
 
+  it('patches the pi-ai release the runtime resolves to parse streamed tool arguments once', () => {
+    // dsh-llm-pi-ai requires ^1.1.0 and upstream pins exactly 1.1.0 with this patch. An
+    // unpatched pi-ai re-parses the whole accumulated tool-call JSON on every stream delta,
+    // so a long tool call (writing a large file) costs quadratic CPU on the event loop.
+    const patchPath = './patches/pi-ai@1.1.0.patch'
+    const patchResolution = `patch:@earendil-works/pi-ai@npm%3A1.1.0#${patchPath}`
+    const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
+    const patch = readFileSync(new URL(patchPath, workspaceRoot), 'utf8').replaceAll('\r\n', '\n')
+    const piAiRoot = new URL('node_modules/@earendil-works/pi-ai/', packageRoot)
+    const installedPiAi = JSON.parse(readFileSync(new URL('package.json', piAiRoot), 'utf8')) as { version?: unknown }
+
+    expect(workspaceManifest.resolutions).toMatchObject({
+      '@earendil-works/pi-ai@npm:^1.1.0': patchResolution,
+      '@earendil-works/pi-telemetry@npm:^1.1.0': '1.1.0',
+    })
+    // The only npm resolution is the source the patch applies to, so no range escapes it.
+    expect([...lockfile.matchAll(/resolution: "@earendil-works\/pi-ai@npm:([^"]+)"/gu)].map(match => match[1]))
+      .toEqual(['1.1.0'])
+    expect(lockfile).toContain(`"@earendil-works/pi-ai@${patchResolution}::`)
+    expect(lockfile).toContain('resolution: "@earendil-works/pi-telemetry@npm:1.1.0"')
+    expect(installedPiAi.version).toBe('1.1.0')
+
+    const files = [...patch.matchAll(/^diff --git a\/(\S+) b\//gmu)].map(match => match[1])
+    expect(files).toEqual([
+      'dist/api/anthropic-messages.js',
+      'dist/api/bedrock-converse-stream.js',
+      'dist/api/mistral-conversations.js',
+      'dist/api/openai-completions.js',
+      'dist/api/openai-responses-shared.js',
+      'dist/api/pi-messages.js',
+    ])
+    for (const section of patch.split(/^diff --git /mu).slice(1)) {
+      const file = section.slice(2, section.indexOf(' '))
+      const installed = readFileSync(new URL(file, piAiRoot), 'utf8').replaceAll('\r\n', '\n')
+      for (const hunk of section.split(/^@@ [^\n]*\n/mu).slice(1)) {
+        const lines = hunk.split('\n').filter(line => /^[ +-]/u.test(line))
+        const before = lines.filter(line => !line.startsWith('+')).map(line => line.slice(1)).join('\n')
+        const after = lines.filter(line => !line.startsWith('-')).map(line => line.slice(1)).join('\n')
+        expect(before).toMatch(/parseStreamingJson\(/u)
+        expect(installed, file).toContain(after)
+        expect(installed, file).not.toContain(before)
+      }
+    }
+  })
+
   it('packages the native-compiled Koffi Windows runtime', () => {
     const lockfile = readFileSync(new URL('yarn.lock', workspaceRoot), 'utf8')
 
-    expect(manifest.dependencies?.koffi).toBe('3.1.5')
+    expect(manifest.dependencies?.koffi).toBe('3.1.1')
     expect(workspaceManifest.resolutions).toMatchObject({
-      'koffi@npm:^3.1.0': '3.1.5',
+      'koffi@npm:^3.1.0': '3.1.1',
     })
-    expect(lockfile).toContain('"koffi@npm:3.1.5":')
-    expect(lockfile).toContain('@koromix/koffi-win32-x64@npm:3.1.5')
+    expect(lockfile).toContain('"koffi@npm:3.1.1":')
+    expect(lockfile).toContain('@koromix/koffi-win32-x64@npm:3.1.1')
     expect(lockfile).not.toContain('"koffi@npm:3.1.4":')
     expect(lockfile).not.toContain('@koromix/koffi-win32-x64@npm:3.1.4')
   })

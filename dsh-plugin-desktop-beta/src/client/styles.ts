@@ -1,72 +1,71 @@
-import {
-  ADVANCED_MACOS_CONTENT_INSET,
-  ADVANCED_MACOS_DRAG_LAYER_Z_INDEX,
-  ADVANCED_MACOS_DRAG_REGION_HEIGHT,
-  ADVANCED_WINDOWS_TITLEBAR_HEIGHT,
-  MACOS_TRAFFIC_LIGHT_SAFE_WIDTH,
-  WINDOWS_CAPTION_CONTROLS_WIDTH,
-} from '../window-chrome.ts'
-import { SIDEBAR_COLLAPSED } from './layout-state.ts'
+/** Next-owned surfaces, plus corrections to the official frontend's macOS window drag. */
+const STYLES = `
+.dshNextSafeModeNotice{position:absolute;right:16px;bottom:16px;max-width:300px;padding:12px;border:1px solid var(--dsw-alias-border-l3);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:12px/1.5 system-ui,sans-serif;pointer-events:auto;-webkit-app-region:no-drag}
+.dshNextSafeModeNotice p{margin:5px 0 8px}.dshNextSafeModeNotice button{font:inherit;border:1px solid currentColor;border-radius:5px;padding:4px 8px;background:transparent;color:inherit;cursor:pointer}
 
-/** Desktop-owned shell stylesheet kept as a plain string so the client bundle stays self-contained. */
-const DESKTOP_OWNED_STYLES = `
-html, body, #root { width: 100%; height: 100%; }
-body:is([data-dsh-desktop-mode="extended"], [data-dsh-desktop-mode="advanced"]) { margin: 0; background: transparent !important; }
-/* The official html[data-platform] marker also activates its native keyboard
-   bridge, which this Desktop shell does not provide. Scope only the menu fill
-   to our own platform marker: an opaque themed layer stays readable even when
-   Chromium cannot blur the transparent vibrancy window. */
-body:is([data-dsh-desktop-mode="extended"], [data-dsh-desktop-mode="advanced"])[data-dsh-desktop-platform="darwin"][data-dsh-desktop-material="transparent"] {
-  --dsw-menu-surface-fill: var(--dsw-alias-bg-layer-2);
+.dshNextSafeModeNotice .dshNextSafeModeDismiss{float:right;border:0;margin:-4px -4px 0 8px;padding:0 6px;font-size:20px;line-height:24px}
+
+/* Respect the native-material preference without replacing official layout. */
+html[data-next-material='off'][data-platform='darwin'] :has(> [data-shell-overlay]) {
+  background: var(--dsw-alias-bg-base);
 }
-.dshDesktopFrame { position: relative; display: grid; grid-template-rows: 100%; width: 100%; height: 100%; overflow: hidden; background: transparent; transition: grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
-.dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: transparent; position: relative; grid-column: 1; grid-row: 1; min-width: 0; overflow: hidden; background: transparent; border-right: 1px solid var(--dsw-alias-border-l1); }
-body:is([data-dsh-desktop-mode="extended"], [data-dsh-desktop-mode="advanced"])[data-dsh-desktop-material="off"] .dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: var(--dsw-alias-bg-layer-1); background: var(--dsw-alias-bg-layer-1); }
-.dshDesktopUpstreamSidebar { box-sizing: border-box; width: 100%; height: 100%; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"] .dshDesktopUpstreamSidebar { padding-top: ${ADVANCED_MACOS_CONTENT_INSET}px; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"][data-sidebar-collapsed] .dshDesktopUpstreamSidebar { width: ${SIDEBAR_COLLAPSED}px; margin: 0 auto; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"] { grid-template-rows: ${ADVANCED_MACOS_DRAG_REGION_HEIGHT}px minmax(0, 1fr); }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"] .dshDesktopSidebarSurface { grid-row: 1 / -1; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"] .dshDesktopConversationSurface,
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"] .dshDesktopRightbarSurface { grid-row: 2; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="darwin"] .dshDesktopSidebarSurface::before { content: ""; position: absolute; z-index: ${ADVANCED_MACOS_DRAG_LAYER_Z_INDEX}; top: 0; right: 0; left: ${MACOS_TRAFFIC_LIGHT_SAFE_WIDTH}px; height: ${ADVANCED_MACOS_DRAG_REGION_HEIGHT}px; user-select: none; -webkit-app-region: drag; }
-.dshDesktopMacCaptionRow { position: absolute; z-index: ${ADVANCED_MACOS_DRAG_LAYER_Z_INDEX}; grid-column: 2 / -1; grid-row: 1; top: 0; right: 0; left: 0; height: ${ADVANCED_MACOS_DRAG_REGION_HEIGHT}px; background: var(--dsw-alias-bg-base); user-select: none; -webkit-app-region: drag; }
-.dshDesktopConversationSurface { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); }
-.dshDesktopRightbarSurface { position: relative; grid-column: 3; grid-row: 1; min-width: 0; min-height: 0; overflow: visible; }
-.dshDesktopFrame[data-rightbar-fullscreen], .dshDesktopFrame[data-rightbar-fullscreen] .dshDesktopResizeHandle { transition: none; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"],
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] { grid-template-rows: ${ADVANCED_WINDOWS_TITLEBAR_HEIGHT}px minmax(0, 1fr); }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopSidebarSurface,
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] .dshDesktopSidebarSurface { grid-row: 1 / -1; }
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopConversationSurface,
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="win32"] .dshDesktopRightbarSurface,
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] .dshDesktopConversationSurface,
-.dshDesktopFrame[data-desktop-mode="advanced"][data-desktop-platform="linux"] .dshDesktopRightbarSurface { grid-row: 2; }
-.dshDesktopWindowsCaptionRow, .dshDesktopLinuxCaptionRow { position: relative; grid-column: 2 / -1; grid-row: 1; min-width: 0; background: var(--dsw-alias-bg-base); }
-.dshDesktopWindowsCaptionRow::before { content: ""; position: absolute; inset: 0 ${WINDOWS_CAPTION_CONTROLS_WIDTH}px 0 0; user-select: none; -webkit-app-region: drag; }
-/* Linux controls can sit on either side, so honour the overlay-safe area Chromium publishes. */
-.dshDesktopLinuxCaptionRow::before { content: ""; position: absolute; top: 0; right: calc(100% - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100%)); bottom: 0; left: env(titlebar-area-x, 0px); user-select: none; -webkit-app-region: drag; }
-.dshDesktopFrame[data-dragging] { transition: none; }
-.dshDesktopOverlay { position: absolute; z-index: 1000; inset: 0; pointer-events: none; }
-.dshDesktopOverlay > * { pointer-events: auto; }
-.dshDesktopResizeHandle { position: absolute; z-index: 50; top: 0; bottom: 0; width: 8px; margin-left: -4px; cursor: col-resize; touch-action: none; -webkit-app-region: no-drag; transition: left var(--ds-transition-duration-slow) var(--ds-ease-in-out); }
-.dshDesktopFrame[data-dragging] .dshDesktopResizeHandle { transition: none; }
-.dshDesktopNoDrag, button, input, textarea, select, label, summary, a, [contenteditable="true"], [role="button"], [role="checkbox"], [role="dialog"], [role="menuitem"], [role="option"], [role="switch"], [role="tab"] { -webkit-app-region: no-drag !important; }
-[role="dialog"], [aria-modal="true"] { -webkit-app-region: no-drag !important; }
-html:has([aria-modal="true"]) .dshDesktopWindowsCaptionRow::before,
-html:has([aria-modal="true"]) .dshDesktopLinuxCaptionRow::before { -webkit-app-region: no-drag !important; }
-@media (prefers-reduced-motion: reduce) {
-  .dshDesktopFrame,
-  .dshDesktopResizeHandle { transition: none !important; }
+
+/* Keep Settings nav items at their 40x164 geometry and scroll with the official l2 gutter. */
+body [data-shortcut-modal='settings'] > nav {
+  min-height: 0;
+}
+body [data-shortcut-modal='settings'] > nav > :first-child,
+body [data-shortcut-modal='settings'] > nav > :last-child > * {
+  flex: none;
+}
+body [data-shortcut-modal='settings'] > nav > :last-child {
+  flex: 1;
+  min-height: 0;
+  margin-right: -10px;
+  padding-right: calc(10px - var(--dsh-scrollbar-width, 5px));
+  padding-bottom: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* Chromium collects app-region boxes without clipping them, in document order, and the last box
+   containing a point decides it. A control scrolled beneath a chrome row therefore subtracts its
+   whole box from the row's drag, which the official frontend leaves unguarded. The scrollers below
+   chrome rows (the transcript, the Plugins page, the workspace list and dock pane bodies) never paint
+   their content over a drag row, so that content declares no region; the reset on each root also stops
+   a region inherited from a pane body. Surfaces that can escape a scroller and the rows pinned inside
+   one keep theirs. The control list is the official interactive no-drag list, whose html-prefixed
+   specificity a scoped rule can only override with !important. */
+@scope (html[data-platform='darwin'] :is([data-conversation-scroll], [data-plugin-body], [role='tree'], :is([data-dockkit-content], [data-dockkit-pane]) > :not(:first-child) > *))
+  to (dialog, [popover], [role='dialog'], [role='alertdialog'], [role='menu'], [role='listbox'], [role='tooltip'], [data-window-drag], [data-plugin-bar]) {
+  :scope,
+  :is(
+    button, a, input, select, textarea, summary, [contenteditable='true'], [tabindex],
+    [role='dialog'], [role='alertdialog'], [role='menu'], [role='listbox'], [role='tooltip'],
+    [role='button'], [role='link'], [role='tab'], [role='menuitem'], [role='menuitemcheckbox'],
+    [role='menuitemradio'], [role='option'], [role='checkbox'], [role='radio'], [role='switch'],
+    [role='slider'], [role='combobox'], [role='textbox']
+  ) {
+    -webkit-app-region: initial !important;
+  }
+}
+
+/* The collapsed Plugins head keeps its resting box but paints only its top part, and the content
+   below that part is visible, so only the painted part drags. */
+html[data-platform='darwin'] [data-plugin-bar][data-natural] [data-window-drag]::after {
+  content: '';
+  position: absolute;
+  inset: var(--plugin-header-paint-height) 0 0;
+  pointer-events: none;
+  -webkit-app-region: no-drag;
 }
 `
 
-/** Install shared panel styles; mode selectors keep enhanced and extended chrome independent. */
-export function installDesktopOwnedStyles(): () => void {
+export function installWindowStyles(): () => void {
   const style = document.createElement('style')
-  style.dataset.plugin = 'dsh-plugin-desktop'
-  style.dataset.pluginCss = 'dsh-plugin-desktop/desktop-owned-layout'
-  style.textContent = DESKTOP_OWNED_STYLES
-  document.head.appendChild(style)
-  return () => { style.remove() }
+  style.dataset.plugin = 'dsh-plugin-desktop-beta/window-controls'
+  style.textContent = STYLES
+  document.head.append(style)
+  return () => style.remove()
 }

@@ -21,7 +21,7 @@ export function writePackage(modules: string, name: string, fields: Record<strin
 }
 
 /** Release facts every fixture payload declares. */
-export const FIXTURE_RELEASE: NextRelease = { schemaVersion: 1, version: '2.0.0-next', dshVersion: '1.0.0', electronVersion: '44.0.0', pnpmVersion: '11.8.0' }
+export const FIXTURE_RELEASE: NextRelease = { schemaVersion: 1, version: '2.0.0-next', dshVersion: '1.0.0', electronVersion: '44.0.0', pnpmVersion: '11.28.5' }
 
 /** Target every fixture payload declares. */
 export const FIXTURE_TARGET: NextRuntimeTarget = { platform: process.platform, archs: [process.arch] }
@@ -51,7 +51,7 @@ export function writeApplication(root: string, release = FIXTURE_RELEASE): void 
  * @param root - Application directory written by {@link writeApplication}.
  */
 export function completeApplication(root: string): void {
-  for (const path of ['lib/host.js', 'lib/client.js', 'lib/preload-app.cjs', 'lib/preload-shell.cjs', 'lib/native-ui/index.html',
+  for (const path of ['lib/host.js', 'lib/client.js', 'lib/preload-app.cjs', 'lib/preload-shell.cjs', 'lib/preload-platform-account.cjs', 'lib/native-ui/index.html',
     'cordis.patch.yml', 'host.cordis.patch.yml', 'scripts/node-bin/node', 'scripts/node-bin/node.cmd',
     'assets/tray-iconTemplate.png', 'assets/tray-icon-blue.png', 'build/app-icon.ico', 'build/app-icon.png', 'build/app-icon-mac.png']) {
     mkdirSync(join(root, path, '..'), { recursive: true })

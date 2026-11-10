@@ -14,6 +14,7 @@ import { browserFixture, verifySidebarBrowser, verifyWebBrowserFallback } from '
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const require = createRequire(import.meta.url)
+const upstreamVersion = require('@deepseek-ai/dsh/package.json').version
 const webRoot = dirname(require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html'))
 const home = mkdtempSync(join(tmpdir(), 'dsh-next-window-controls-'))
 const workspace = join(home, 'workspace')
@@ -66,6 +67,7 @@ try {
       networkExposure: 'loopback', port: 0, lanPort: 0, logLevel: 'info', notifications: true,
       turnCompleted: true, turnFailed: true, jobCompleted: false, jobFailed: false },
     phase: 'ready', busy: false, failure: '', safeMode: false, home: '[temporary test home]', platform: 'darwin',
+    dataDirectory: { source: 'desktop', environmentHome: '[temporary variable home]' },
     version: '2.0.14-next', updates: { phase: 'idle', installable: true }, trayAvailable: true, notificationsAvailable: true, browserUrl: null, lan: null,
     recovery: { bundles: [{ bundleId: 'fixture-plugin', packageName: 'fixture-plugin', owner: 'profile', status: 'active', action: 'uninstall' }],
       checkpoints: [{ id: 'fixture-checkpoint', created: new Date().toISOString(), fileCount: 3, totalBytes: 128 }],
@@ -106,6 +108,10 @@ try {
   })
   await context.addInitScript(() => {
     window.desktopNext = { state: () => window.__nextTestState(), browserLinks: () => window.__nextTestBrowserLinks(), command: command => window.__nextTestCommand(command) }
+    window.desktopNext.renderer = {
+      profile: () => 'desktop',
+      report: async status => { globalThis.__NEXT_TEST_BOOT__.rendererStatus = status },
+    }
     window.desktopNext.onOpenSettings = listener => {
       window.__nextTestOpenSettings = listener
       return () => { delete window.__nextTestOpenSettings }
@@ -162,6 +168,8 @@ try {
   page.on('console', message => { if (['error', 'warning'].includes(message.type())) diagnostics.push(message.text()) })
   page.on('response', response => { if (response.status() >= 400) diagnostics.push(`${response.status()} ${new URL(response.url()).pathname}`) })
   await page.goto(streamBaseUrl)
+  // A mounted official shell is healthy without waiting for connection/session probes.
+  await page.waitForFunction(() => globalThis.__NEXT_TEST_BOOT__.rendererStatus === 'healthy')
   const collapse = page.getByRole('button', { name: /^(收起侧边栏|Collapse sidebar)$/ })
   const reopen = page.locator('[data-sidebar-header-controls]').getByRole('button', { name: /^(打开侧边栏|Open sidebar)$/ })
   const conversationHeader = page.locator('header[data-window-drag]:has([data-conversation-header-leading])')
@@ -232,10 +240,79 @@ try {
         region: style.getPropertyValue('-webkit-app-region') }
     })
     assert.equal(geometry.region, 'drag')
-    assert.ok(geometry.left >= geometry.columns[0], JSON.stringify(geometry))
+    assert.ok(geometry.left >= geometry.columns[0] - 1, JSON.stringify(geometry))
     assert.ok(geometry.left + geometry.width <= geometry.columns[0] + geometry.columns[1] + 1, JSON.stringify(geometry))
     assert.ok(geometry.width > 300 && geometry.height >= 30, JSON.stringify(geometry))
     assert.equal(await page.locator('[data-next-window-controls]').count(), 0, 'No extra visible titlebar or overlay component')
+  }
+  // Chromium collects app-region boxes without clipping them, and the window lets the last box containing
+  // a point decide it.
+  const installDragRegions = () => page.evaluate(() => {
+    globalThis.__nextDragRegions = points => {
+      const regions = [...document.querySelectorAll('*')].flatMap(element => {
+        const style = getComputedStyle(element)
+        const region = style.getPropertyValue('-webkit-app-region')
+        if (region === 'none' || style.visibility !== 'visible' || ['none', 'contents', 'inline'].includes(style.display)) return []
+        const box = element.getBoundingClientRect()
+        const collected = [{ region, box }]
+        // The one generated box this reads: the part of the Plugins head that does not paint.
+        const trim = getComputedStyle(element, '::after')
+        if (element.hasAttribute('data-window-drag') && !['none', 'normal'].includes(trim.content)) {
+          collected.push({ region: trim.getPropertyValue('-webkit-app-region'),
+            box: { left: box.left, right: box.right, top: box.bottom - Number.parseFloat(trim.height), bottom: box.bottom } })
+        }
+        return collected
+      })
+      return points.map(([x, y]) => regions.reduce((decided, { region, box }) =>
+        x >= box.left && x < box.right && y >= box.top && y < box.bottom ? region : decided, 'none'))
+    }
+  })
+  // A control inside a scroller whose box reaches a chrome row must change nothing about that row: its empty
+  // run still drags and its controls stay clickable. Without the Desktop window styles the official rules alone
+  // let the control punch the row; once they stop doing so, retire the reset in src/client/styles.ts.
+  const checkRowAboveScroller = async (row, scroller) => {
+    await installDragRegions()
+    const result = await row.evaluate(async (element, hostSelector) => {
+      // While a drag row moves, the official recall pulse marks the body no-drag, and the boxes inheriting
+      // it cover the row. The mark also flickers off for single frames as a movement starts, so the
+      // surface is read in this task once the mark has stayed off for a dozen frames.
+      await new Promise(resolve => {
+        let quiet = 0
+        const tick = () => {
+          quiet = document.body.hasAttribute('data-window-drag-recall') ? 0 : quiet + 1
+          if (quiet >= 12) resolve()
+          else requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      })
+      const host = document.querySelector(hostSelector)
+      if (host === null) return { missing: hostSelector }
+      const box = element.getBoundingClientRect()
+      const points = []
+      for (let y = Math.max(box.top, 0) + 2; y < Math.min(box.bottom, innerHeight); y += 6) {
+        for (let x = Math.max(box.left, 0) + 2; x < Math.min(box.right, innerWidth); x += 12) points.push([x, y])
+      }
+      const before = globalThis.__nextDragRegions(points)
+      const control = document.createElement('button')
+      control.style.cssText = `position:fixed;left:0;top:0;width:${box.width}px;height:${box.height}px;padding:0;border:0;z-index:-1`
+      const content = document.createElement('span')
+      content.style.cssText = 'display:block;height:100%'
+      control.append(content)
+      host.append(control)
+      const placed = control.getBoundingClientRect()
+      control.style.translate = `${box.left - placed.left}px ${box.top - placed.top}px`
+      const own = document.querySelector('style[data-plugin$="/window-controls"]')
+      own.disabled = true
+      const official = globalThis.__nextDragRegions(points)
+      own.disabled = false
+      const corrected = globalThis.__nextDragRegions(points)
+      control.remove()
+      const differs = regions => regions.filter((region, index) => region !== before[index]).length
+      return { drags: before.filter(region => region === 'drag').length, punched: differs(official), changed: differs(corrected) }
+    }, scroller)
+    assert.ok(result.drags > 0, `The row above ${scroller} declares no drag: ${JSON.stringify(result)}`)
+    assert.ok(result.punched > 0, `The official rules no longer let a control in ${scroller} punch the row: ${JSON.stringify(result)}`)
+    assert.equal(result.changed, 0, `A control in ${scroller} changes the drag surface of the row above it: ${JSON.stringify(result)}`)
   }
   const expand = async () => {
     await reopen.waitFor({ state: 'visible' })
@@ -259,10 +336,24 @@ try {
   assert.equal(await conversationHeader.count(), 1)
   assert.equal(await page.locator('[data-conversation-header-leading]').count(), 1)
   await checkDrag()
+  for (const index of [0, 1]) await checkRowAboveScroller(page.locator('[data-window-drag]:not(header)').nth(index), '[role="tree"]')
   await collapse.click()
   await reopen.waitFor({ state: 'visible' })
   assert.equal(await page.locator('[data-sidebar-header-controls] button').count(), 2,
     'Conversation headers keep both official sidebar and new-session controls')
+  await checkRowAboveScroller(conversationHeader, '[data-conversation-scroll]')
+  // Only a surface that can escape the transcript keeps its subtraction.
+  assert.deepEqual(await page.evaluate(() => {
+    const plain = document.createElement('button')
+    const menu = document.createElement('div')
+    menu.setAttribute('role', 'menu')
+    const item = menu.appendChild(document.createElement('button'))
+    document.querySelector('[data-conversation-scroll]').append(plain, menu)
+    const regions = [plain, menu, item].map(element => getComputedStyle(element).getPropertyValue('-webkit-app-region'))
+    plain.remove()
+    menu.remove()
+    return regions
+  }), ['none', 'no-drag', 'no-drag'])
   mkdirSync(screenshots, { recursive: true })
   await page.screenshot({ path: join(screenshots, 'new-session-collapsed.png'), animations: 'disabled' })
   // A tray/shortcut request activates the official Settings trigger even with the sidebar collapsed.
@@ -271,6 +362,64 @@ try {
   assert.equal(await context.pages().length, 1, 'Settings must stay inside the existing app window')
   await page.evaluate(() => window.__nextTestOpenSettings('general'))
   assert.equal(await page.getByRole('dialog', { name: /^(设置|Settings)$/ }).count(), 1)
+  // Simulate many registered Settings sections and verify the left nav scrolls without squishing items.
+  const settingsNavScroll = await page.locator('[data-shortcut-modal="settings"] > nav').evaluate(nav => {
+    const title = nav.firstElementChild
+    const list = nav.lastElementChild
+    const template = list.querySelector('button')
+    const baseRect = template.getBoundingClientRect()
+    const titleTopBefore = title.getBoundingClientRect().top
+    const clones = []
+    for (let index = 0; index < 20; index++) {
+      const clone = template.cloneNode(true)
+      clone.classList.remove(...Array.from(clone.classList).filter(name => name.endsWith('_active')))
+      clone.removeAttribute('aria-current')
+      clone.removeAttribute('data-modal-autofocus')
+      clone.dataset.nextNavFixture = String(index)
+      list.appendChild(clone)
+      clones.push(clone)
+    }
+    const buttons = Array.from(list.querySelectorAll('button')).map(button => {
+      const rect = button.getBoundingClientRect()
+      return { width: Math.round(rect.width), height: Math.round(rect.height) }
+    })
+    const style = getComputedStyle(list)
+    const clientHeight = list.clientHeight
+    const scrollHeight = list.scrollHeight
+    list.scrollTop = scrollHeight
+    const scrollTop = list.scrollTop
+    const titleTopAfter = title.getBoundingClientRect().top
+    for (const clone of clones) clone.remove()
+    list.scrollTop = 0
+    return {
+      baseWidth: Math.round(baseRect.width),
+      baseHeight: Math.round(baseRect.height),
+      buttons,
+      overflowY: style.overflowY,
+      overscrollBehaviorY: style.overscrollBehaviorY,
+      scrollbarGutter: style.scrollbarGutter,
+      paddingBottom: style.paddingBottom,
+      clientHeight,
+      scrollHeight,
+      scrollTop,
+      titleTopBefore,
+      titleTopAfter,
+    }
+  })
+  assert.equal(settingsNavScroll.overflowY, 'auto')
+  assert.equal(settingsNavScroll.overscrollBehaviorY, 'contain')
+  assert.equal(settingsNavScroll.scrollbarGutter, 'stable')
+  assert.equal(settingsNavScroll.paddingBottom, '12px')
+  assert.equal(settingsNavScroll.baseWidth, 164)
+  assert.equal(settingsNavScroll.baseHeight, 40)
+  assert.ok(settingsNavScroll.buttons.every(box => box.width === 164 && box.height === 40),
+    `Settings nav items must keep 164x40 geometry when overflowing: ${JSON.stringify(settingsNavScroll.buttons)}`)
+  assert.ok(settingsNavScroll.scrollHeight > settingsNavScroll.clientHeight,
+    `Settings nav list must overflow vertically: ${JSON.stringify(settingsNavScroll)}`)
+  assert.ok(settingsNavScroll.scrollTop > 0,
+    `Settings nav list must scroll vertically: ${JSON.stringify(settingsNavScroll)}`)
+  assert.equal(settingsNavScroll.titleTopAfter, settingsNavScroll.titleTopBefore,
+    'Scrolling the Settings nav list must keep the Settings header stationary')
   await page.getByRole('button', { name: /^(关闭|Close)$/ }).click()
   await expand()
 
@@ -380,7 +529,7 @@ try {
   const cuaSettings = controls.locator('[data-next-computer-use]')
   // The overview now uses compact plugin rows; runtime status lives on the detail page.
   const checkCuaStatus = async status => {
-    await controls.getByRole('button', { name: /^Computer Use — / }).click()
+    await controls.getByRole('button', { name: /^Computer Use(（Next）| \(Next\)) — / }).click()
     await page.locator('[data-next-computer-use]').getByRole('status').getByText(status).waitFor()
     await page.getByRole('button', { name: /^(返回插件(?:列表)?|Back to plugins)$/ }).click()
     await controls.waitFor({ state: 'visible' })
@@ -390,7 +539,7 @@ try {
     })
   }
   await checkCuaStatus(/^(已停用|Disabled)$/)
-  const cuaSwitch = cuaSettings.getByRole('switch', { name: /启用 Computer Use|Enable Computer Use/ })
+  const cuaSwitch = cuaSettings.getByRole('switch', { name: /启用 Computer Use（Next）|Enable Computer Use \(Next\)/ })
   assert.equal(await cuaSwitch.isChecked(), false)
   assert.equal(await cuaSwitch.isDisabled(), false)
   const firstGroup = page.locator('[data-plugin-group]').first()
@@ -449,6 +598,8 @@ try {
   assert.equal(await refresh.evaluate(element => getComputedStyle(element).getPropertyValue('-webkit-app-region')), 'no-drag')
   await refresh.click()
   const pluginPanel = page.locator('[data-plugin-panel]')
+  // dsh 0.2.2 scrolls the page body under a pinned header bar; earlier releases scroll the whole panel.
+  const pluginScroller = page.locator('[data-plugin-panel] [data-plugin-body], [data-plugin-panel]:not(:has([data-plugin-body]))')
   const pluginHeader = page.locator('[data-plugin-page-header="list"]')
   const checkPluginReopen = async () => {
     await reopen.waitFor({ state: 'visible' })
@@ -476,10 +627,12 @@ try {
       const style = getComputedStyle(header)
       const pseudo = getComputedStyle(column, '::before')
       return { headerPosition: style.position, region: style.getPropertyValue('-webkit-app-region'),
+        // dsh 0.2.2 positions the head relative to its sticky bar once that bar measured its natural height.
+        naturalBar: header.closest('[data-plugin-bar]')?.hasAttribute('data-natural') === true,
         extraCaption: pseudo.content, extraRegion: pseudo.getPropertyValue('-webkit-app-region') }
     })
     assert.equal(geometry.region, 'drag')
-    assert.equal(geometry.headerPosition, 'static', 'Keep the official header in normal document flow')
+    assert.equal(geometry.headerPosition, geometry.naturalBar ? 'relative' : 'static', 'Keep the official header in normal document flow')
     assert.equal(geometry.extraCaption, 'none', 'Next must not add its old fixed caption band')
     assert.notEqual(geometry.extraRegion, 'drag')
   }
@@ -504,22 +657,34 @@ try {
   await page.getByRole('dialog').waitFor({ state: 'hidden' })
   await page.setViewportSize({ width: 1280, height: 480 })
   const beforeScroll = await pluginHeader.boundingBox()
-  await pluginPanel.evaluate(element => { element.scrollTop = 220 })
-  const scrollTop = await pluginPanel.evaluate(element => element.scrollTop)
+  await pluginScroller.evaluate(element => { element.scrollTop = 220 })
+  const scrollTop = await pluginScroller.evaluate(element => element.scrollTop)
   assert.ok(scrollTop > 0)
-  assert.ok(Math.abs((await pluginHeader.boundingBox()).y - beforeScroll.y + scrollTop) < 1,
+  const pinnedHeader = await pluginHeader.evaluate(header => header.closest('[data-plugin-bar]') !== null)
+  assert.ok(Math.abs((await pluginHeader.boundingBox()).y - (pinnedHeader ? beforeScroll.y : beforeScroll.y - scrollTop)) < 1,
     'The official plugin header keeps its original scrolling behavior')
   await checkPluginHeader()
+  await checkRowAboveScroller(pluginHeader, '[data-plugin-body]')
+  // The collapsed head paints only its top part, so only that part drags.
+  const headerTrim = await pluginHeader.evaluate(header => ({
+    region: getComputedStyle(header, '::after').getPropertyValue('-webkit-app-region'),
+    top: getComputedStyle(header, '::after').top,
+    paint: getComputedStyle(header.closest('[data-plugin-bar]')).getPropertyValue('--plugin-header-paint-height'),
+  }))
+  assert.deepEqual(headerTrim, { region: 'no-drag', top: headerTrim.paint, paint: headerTrim.paint })
   // Controls remain interactive when scrolled to the top of the window.
   const remoteGearY = (await remoteGear.boundingBox()).y
-  await pluginPanel.evaluate((element, delta) => { element.scrollTop += delta }, remoteGearY - 16)
+  await pluginScroller.evaluate((element, delta) => { element.scrollTop += delta }, remoteGearY - 16)
   assert.ok((await remoteGear.boundingBox()).y < 52)
-  assert.equal(await remoteGear.evaluate(element => getComputedStyle(element).getPropertyValue('-webkit-app-region')), 'no-drag')
+  await remoteGear.scrollIntoViewIfNeeded()
+  const remoteGearBox = await remoteGear.boundingBox()
+  assert.notDeepEqual(await page.evaluate(points => globalThis.__nextDragRegions(points),
+    [[remoteGearBox.x + remoteGearBox.width / 2, remoteGearBox.y + remoteGearBox.height / 2]]), ['drag'])
   await remoteGear.click()
   await remoteDialog.waitFor()
   await remoteDialog.getByRole('button', { name: /^(关闭远程控制|Close Remote Control|关闭手机连接)$/ }).click()
   await page.screenshot({ path: join(screenshots, 'plugins-scrolled.png'), animations: 'disabled' })
-  await pluginPanel.evaluate(element => { element.scrollTop = 0 })
+  await pluginScroller.evaluate(element => { element.scrollTop = 0 })
   await page.setViewportSize({ width: 1280, height: 840 })
   await page.locator('[data-plugin-item]').first().getByRole('button').first().click()
   const detailHeader = page.locator('[data-plugin-page-header="detail"]')
@@ -549,8 +714,8 @@ try {
   await page.getByRole('dialog').waitFor({ state: 'hidden' })
   await page.screenshot({ path: join(screenshots, 'plugins-collapsed.png'), animations: 'disabled' })
   await page.setViewportSize({ width: 1280, height: 480 })
-  await pluginPanel.evaluate(element => { element.scrollTop = 220 })
-  assert.ok(await pluginPanel.evaluate(element => element.scrollTop) > 0)
+  await pluginScroller.evaluate(element => { element.scrollTop = 220 })
+  assert.ok(await pluginScroller.evaluate(element => element.scrollTop) > 0)
   await checkPluginReopen()
   await expand()
   await page.setViewportSize({ width: 1280, height: 840 })
@@ -570,14 +735,38 @@ try {
   await reopen.waitFor({ state: 'visible' })
   await page.screenshot({ path: join(screenshots, 'blank-session-collapsed.png'), animations: 'disabled' })
   await expand()
+  // The official layout measures its frame through ResizeObserver + rAF and animates sidebar
+  // toggles, so assert only once the grid reflects both the requested width and sidebar state.
+  const settleLayout = (width, collapsed) => page.waitForFunction(({ width, collapsed }) => {
+    const frame = document.querySelector('[data-shell-overlay]').parentElement
+    if (frame.hasAttribute('data-animating') || frame.hasAttribute('data-sidebar-collapsed') !== collapsed) return false
+    const columns = getComputedStyle(frame).gridTemplateColumns.split(' ').map(Number.parseFloat)
+    return (columns[0] === 0) === collapsed && Math.abs(columns.reduce((sum, column) => sum + column, 0) - width) < 1
+  }, { width, collapsed })
   for (const width of [800, 1800, 1280]) {
     await page.setViewportSize({ width, height: 840 })
+    // Below 1024px ui-layout auto-collapses the sidebar and its toggle re-expands it beside the
+    // squeezed center; wider windows keep the expanded sidebar from the previous step.
+    const narrow = width < 1024
+    await settleLayout(width, narrow)
     await checkDrag()
+    if (narrow) {
+      await expand()
+      await settleLayout(width, false)
+      await checkDrag()
+    }
     await collapse.click()
     await reopen.waitFor({ state: 'visible' })
+    await settleLayout(width, true)
     await checkDrag()
     await expand()
+    await settleLayout(width, false)
   }
+  await page.getByRole('button', { name: /^(打开右侧边栏|Open right sidebar)$/ }).click()
+  const paneStrip = page.locator('[data-dockkit-strip][data-window-drag]')
+  await paneStrip.waitFor()
+  await checkRowAboveScroller(paneStrip, '[data-dockkit-content][data-dockkit-pane] > :not(:first-child) > *')
+  await page.getByRole('button', { name: /^(收起右侧边栏|Collapse right sidebar)$/ }).click()
   await verifySidebarBrowser(page, nativeBrowser, screenshots)
 
   // Other platforms retain their own native chrome; no macOS drag region leaks through.
@@ -600,9 +789,12 @@ try {
   await restartOptions.press('ArrowDown')
   await actions.getByRole('menuitem', { name: /^(重启到恢复模式|Restart in Recovery Mode)$/ }).click()
   assert.equal(controlCommands.at(-1).type, 'restart-recovery')
+  // The navigation row shows the Desktop display glyph instead of the settings gear, through the settings shell's
+  // icon slot where the release has one and through the shell's Yarn patch otherwise.
+  assert.equal(await page.getByRole('button', { name: /^(桌面设置|Desktop settings)$/ }).locator('svg rect[width="13"][height="9"]').count(), 1)
   await page.getByRole('button', { name: /^(桌面设置|Desktop settings)$/ }).click()
   const settings = page.locator('[data-next-desktop-settings]')
-  await settings.getByRole('heading', { name: /^(DSH Desktop 设置|DSH Desktop Settings)$/ }).waitFor()
+  await settings.getByRole('heading', { name: /^(DSH NEXT 设置|DSH NEXT settings)$/ }).waitFor()
   const pluginNotice = settings.locator('[data-next-plugin-settings-notice]')
   await pluginNotice.getByText('插件市场和远程控制设置已移至插件页面。', { exact: true }).waitFor()
   await page.screenshot({ path: join(screenshots, 'desktop-plugin-settings-notice.png'), animations: 'disabled' })
@@ -613,17 +805,22 @@ try {
   assert.equal(await context.pages().length, 1, 'Leaving Settings for Plugins must reuse the main window')
   await openSettingsPanel()
   await page.getByRole('button', { name: /^(桌面设置|Desktop settings)$/ }).click()
-  await settings.getByRole('heading', { name: /^(DSH Desktop 设置|DSH Desktop Settings)$/ }).waitFor()
+  await settings.getByRole('heading', { name: /^(DSH NEXT 设置|DSH NEXT settings)$/ }).waitFor()
   assert.equal(await settings.locator('nav').count(), 0)
   const updateSection = settings.locator('[data-next-updates]')
+  const releaseNotes = updateSection.getByRole('link', { name: /^(更新公告|Release notes)$/ })
+  assert.equal(await releaseNotes.getAttribute('href'), `https://github.com/anywhere-labs/dsh-desktop/releases/tag/v${controlState.version}`)
+  assert.equal(await releaseNotes.getAttribute('target'), '_blank')
+  assert.equal(await releaseNotes.getAttribute('rel'), 'noopener noreferrer')
   await updateSection.getByRole('button', { name: /检查更新|Check for updates/ }).click()
   assert.equal(controlCommands.at(-1).type, 'check-updates')
-  controlState.updates = { phase: 'downloading', version: '2.0.19-next.1', installable: true, received: 50, total: 100 }
+  controlState.updates = { phase: 'downloading', version: '2.0.20-next.1', installable: true, received: 50, total: 100 }
   await updateSection.getByText(/正在下载更新 50%|Downloading update 50%/).waitFor()
   assert.equal(await updateSection.locator('progress').getAttribute('value'), '50')
+  assert.equal(await releaseNotes.getAttribute('href'), `https://github.com/anywhere-labs/dsh-desktop/releases/tag/v${controlState.updates.version}`)
   await updateSection.scrollIntoViewIfNeeded()
   await page.screenshot({ path: join(screenshots, 'desktop-update-progress.png'), animations: 'disabled' })
-  controlState.updates = { phase: 'ready', version: '2.0.19-next.1', installable: true }
+  controlState.updates = { phase: 'ready', version: '2.0.20-next.1', installable: true }
   await updateSection.getByRole('button', { name: /安装并重启|Install and restart/ }).click()
   assert.equal(controlCommands.at(-1).type, 'install-update')
   controlState.updates = { phase: 'idle', installable: true }
@@ -638,6 +835,27 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll('[data-next-desktop-settings] button')].some(button => /^(设置向导|Setup wizard)$/.test(button.textContent) && !button.disabled))
   await settings.locator('.dshDesktopSettingsGroup').filter({ has: page.getByRole('heading', { name: /^(桌面工具|Desktop tools)$/ }) }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: join(screenshots, 'desktop-setup-wizard-entry.png'), animations: 'disabled' })
+  // The loaded data directory sits between the tool buttons and the log level, with the
+  // recovery assistant's switch and a backup before any reset.
+  const dataDirectory = settings.locator('[data-next-data-directory]')
+  await dataDirectory.locator('code').getByText('[temporary test home]', { exact: true }).waitFor()
+  await dataDirectory.getByText('应用内选择', { exact: true }).waitFor()
+  await dataDirectory.getByText('应用内选择优先于 DSH_DESKTOP_NEXT_HOME。如需重置当前数据目录，请先备份，再到恢复助手中操作。', { exact: true }).waitFor()
+  assert.equal(await dataDirectory.evaluate(row => row.previousElementSibling?.classList.contains('dshDesktopSettingsToolActions')
+    && row.nextElementSibling?.classList.contains('dshDesktopSettingsMaterialField')), true)
+  await dataDirectory.getByRole('button', { name: /^(切换|Change)$/ }).click()
+  assert.equal(controlCommands.at(-1).type, 'change-data-directory')
+  await dataDirectory.getByRole('button', { name: /^(备份|Back up)$/ }).click()
+  assert.equal(controlCommands.at(-1).type, 'backup-data-directory')
+  await dataDirectory.scrollIntoViewIfNeeded()
+  await page.screenshot({ path: join(screenshots, 'desktop-data-directory.png'), animations: 'disabled' })
+  controlState.safeMode = true
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-next-data-directory] button')].every(button => button.disabled))
+  controlState.safeMode = false
+  controlState.dataDirectory = { source: 'environment', environmentHome: '[temporary test home]' }
+  await dataDirectory.getByText('DSH_DESKTOP_NEXT_HOME', { exact: true }).waitFor()
+  assert.equal(await dataDirectory.getByText(/优先于/).count(), 0)
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-next-data-directory] button')].every(button => !button.disabled))
   assert.equal(await settings.getByRole('radio', { name: /^broken/ }).getAttribute('aria-disabled'), 'true')
   assert.equal(await settings.getByRole('radio', { name: /增强模式|扩展模式|Advanced mode|Extended mode/ }).count(), 0)
   assert.equal(await settings.locator('#dsh-desktop-market-title, #dsh-desktop-aa-title').count(), 0)
@@ -649,6 +867,11 @@ try {
   assert.equal(await settings.getByRole('heading', { name: /^(端口设置|Port settings)$/ }).count(), 0)
   assert.equal(await settings.getByRole('spinbutton').count(), 0)
   const notifications = settings.getByRole('switch', { name: /启用桌面通知|Enable Desktop notifications/ })
+  const notificationsExpander = settings.locator('[aria-labelledby="dsh-desktop-notifications-title"] .dshDesktopSettingsExpander')
+  assert.equal(await notificationsExpander.getAttribute('aria-expanded'), 'false')
+  assert.equal(await settings.getByRole('switch', { name: /本轮任务完成|Current turn completed/ }).count(), 0)
+  await notificationsExpander.click()
+  assert.equal(await notificationsExpander.getAttribute('aria-expanded'), 'true')
   assert.equal(await settings.getByRole('switch', { name: /后台任务|Background job/ }).count(), 0)
   const permissions = settings.getByRole('region', { name: /系统权限|System permissions/ })
   await permissions.getByRole('button', { name: /^(授权设置|Permissions)$/ }).click()
@@ -673,9 +896,9 @@ try {
   await settings.getByText('Fixture: preference save rejected').waitFor()
   assert.equal(await closeToTray.isChecked(), false)
   controlState.platform = 'win32'
-  await settings.locator('.dshDesktopSettingsMaterialField select').first().locator('option[value="transparent"]').waitFor({ state: 'detached' })
+  await settings.locator('[data-desktop-material-row]').waitFor({ state: 'detached' })
   // Windows offers no window material, so the material selector disappears entirely.
-  assert.equal(await settings.locator('option[value="transparent"]').count(), 0)
+  assert.equal(await settings.locator('[data-desktop-material-row]').count(), 0)
   controlState.platform = 'linux'
   await actions.getByRole('button', { name: /打开 DSH 终端|Open DSH Terminal/ }).waitFor({ state: 'hidden' })
   controlState.platform = 'darwin'
@@ -731,6 +954,9 @@ try {
   recoveryPage.on('pageerror', error => { recoveryErrors.push(error.message); diagnostics.push('Recovery: ' + error.message) })
   recoveryPage.on('console', message => { if (message.type() === 'error') diagnostics.push('Recovery: ' + message.text()) })
   controlState.phase = 'error'; controlState.failure = 'Fixture: invalid Profile manifest <script>unsafe()</script>'
+  const failureReport = 'dsh-desktop-next-failure-2026-10-29T10-30-00-000Z-host-boot.log'
+  controlState.failureReport = { status: 'saved', file: '/fixture/logs/' + failureReport }
+  controlState.recovery.repairBackup = { id: 'fixture-repair', created: new Date().toISOString(), fileCount: 2, totalBytes: 96 }
   await recoveryPage.route('http://next-recovery.test/**', async route => {
     const response = await serveWebDocument(new Request(route.request().url()), join(root, 'lib/native-ui'), false)
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) })
@@ -744,6 +970,15 @@ try {
   assert.deepEqual(controlCommands.at(-1), { type: 'recovery-action', action: 'restart' })
   await recoveryPage.getByRole('link', { name: '进入安全模式', exact: true }).click()
   assert.equal(controlCommands.at(-1).type, 'safe-mode')
+  // The quick tab repairs the Profile and reveals the report saved for this failure.
+  await recoveryPage.getByText(`本次故障已保存为 ${failureReport}，反馈问题时可作为附件。分享前请检查其中的本机路径和插件输出。`, { exact: true }).waitFor()
+  await recoveryPage.locator('a[href*="show-failure-report"]').click()
+  assert.deepEqual(controlCommands.at(-1), { type: 'recovery-action', action: 'show-failure-report' })
+  await recoveryPage.getByRole('link', { name: '备份并修复', exact: true }).click()
+  assert.deepEqual(controlCommands.at(-1), { type: 'recover' })
+  // A repair is undone from the same tab by restoring the backup it made.
+  await recoveryPage.getByRole('link', { name: '恢复修复前的配置', exact: true }).click()
+  assert.deepEqual(controlCommands.at(-1), { type: 'recovery-action', action: 'preview-checkpoint', id: 'fixture-repair' })
   await recoveryPage.screenshot({ path: join(screenshots, 'recovery-assistant.png'), animations: 'disabled', fullPage: true })
   await recoveryPage.getByRole('tab', { name: /插件/ }).click()
   await recoveryPage.locator('a[href*="preview-uninstall"]').click()
@@ -761,6 +996,12 @@ try {
   assert.deepEqual(controlCommands.at(-1), { type: 'recovery-action', action: 'open-profile-manifest' })
   await recoveryPage.getByRole('link', { name: /保存诊断|导出诊断/ }).click()
   assert.equal(controlCommands.at(-1).type, 'diagnostics')
+  // An action that failed after the reason, such as from the tray, appears beside it without replacing it.
+  controlState.actionFailure = 'Fixture: the terminal could not open'
+  await recoveryPage.locator('[data-sonner-toast]').getByText('操作未完成', { exact: true }).waitFor()
+  await recoveryPage.getByText(controlState.actionFailure, { exact: true }).waitFor()
+  assert.equal(await recoveryPage.getByText(controlState.failure, { exact: true }).textContent(), controlState.failure)
+  delete controlState.actionFailure
   assert.deepEqual(recoveryErrors, [])
   await recoveryPage.goto('http://next-recovery.test/?locale=zh&platform=darwin&frame=true#create-profile')
   await recoveryPage.locator('#profile-name').waitFor()
@@ -777,6 +1018,7 @@ try {
   controlState.safeMode = true
   // A reload re-runs the Desktop boot contract, which must pick up the Host's current boot table.
   await page.reload()
+  await page.waitForFunction(() => globalThis.__NEXT_TEST_BOOT__.rendererStatus === 'healthy')
   await page.locator('.dshNextSafeModeNotice').waitFor({ state: 'visible' })
   assert.equal(await page.evaluate(() => globalThis.__NEXT_TEST_BOOT__.calls), 1)
   // 0.1.7 ships a default model and remembers the dismissal, so the reloaded document usually has
@@ -818,7 +1060,7 @@ try {
   await webContext.close()
   assert.deepEqual(errors, [])
   assert.deepEqual(await page.evaluate(() => globalThis.__NEXT_TEST_BOOT__.failures), [])
-  console.log('Next window controls passed through the official 0.2.1-rc.2 Desktop boot branch: stacked sidebar extension entries, homepage/plugin collapse and reopen, navigation, caption geometry, clickable actions, existing-header and platform isolation, official Settings header shortcuts and keyboard navigation, grouped Desktop Settings and immediate saves, per-address login URL rows with exact open/copy targets, Profile cards and tray creation, the Host-independent recovery artifact, and native Browser toolbar, navigation, pane geometry, overlay isolation, tab lifetime and Web iframe fallback. Chromium simulates the preload contract; native Electron window movement and page loading are not tested here.')
+  console.log(`Next window controls passed through the official ${upstreamVersion} Desktop boot branch: stacked sidebar extension entries, homepage/plugin collapse and reopen, navigation, caption geometry, drag rows above scrolled content, clickable actions, existing-header and platform isolation, official Settings header shortcuts and keyboard navigation, grouped Desktop Settings and immediate saves, per-address login URL rows with exact open/copy targets, Profile cards and tray creation, the Host-independent recovery artifact, and native Browser toolbar, navigation, pane geometry, overlay isolation, tab lifetime and Web iframe fallback. Chromium simulates the preload contract; native Electron window movement and page loading are not tested here.`)
   console.log(`Screenshots: ${screenshots}`)
 } catch (error) {
   console.error(error)

@@ -1,22 +1,26 @@
 /** Next-owned profile state. Recovery works without importing any user plugin. */
+import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, unlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { initProfile, loadOverlayPatches, loadProfileDirectory, PROFILE_TEMPLATES, readProfilePatches, type Profile, type ProfileContext } from '@deepseek-ai/dsh-app-boot'
+import { getDshRuntimeVersion, initProfile, loadOverlayPatches, loadProfileDirectory, readProfilePatches, sanitizeProfile, type Profile, type ProfileContext, type ProfilePnpmInvocation } from '@deepseek-ai/dsh-app-boot'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
-import { atomicJson, atomicText, readPrivateFile } from './private-files.ts'
+import { atomicJson, atomicText, readPrivateFile, removePrivateFileBom } from './private-files.ts'
 import { NextRecovery } from './recovery.ts'
 import { DEFAULT_PROFILE } from './desktop-contract.ts'
 import { computerUsePatch } from './profile-computer-use.ts'
 import { pluginMarketPatch } from './profile-plugin-market.ts'
 import { RETIRED_SCHEDULE_BUNDLE, retiredSchedulePatch } from './profile-schedule.ts'
-import { removeLinkProjectionsSafely } from '../../dsh-plugin-desktop-beta/src/link-projections.ts'
+import { removeLinkProjectionsSafely } from '../../dsh-plugin-desktop/src/link-projections.ts'
 import { insideArchive, unpackedPath } from './asar-archive-policy.ts'
+import { ON_DEMAND_BUNDLES, PROFILE_TEMPLATES } from './upstream-family.ts'
 
 export const NEXT_PACKAGE = fileURLToPath(new URL('../package.json', import.meta.url))
 export const WEB_BUNDLES = [...PROFILE_TEMPLATES.web!.bundles]
 const NEXT_BUNDLE_PATCH = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
+/** How long removing on-demand bundles of another DSH release may hold up a Host start; pnpm runs offline. */
+const ON_DEMAND_REMOVAL_TIMEOUT_MS = 30_000
 export const AA_PACKAGE = '@agents-anywhere/dsh-bridge-next'
 export const COMMUNITY_MARKET_PACKAGE = 'dsh-community-market'
 export const DSH_MARKET_PACKAGE = 'dshmarket'
@@ -35,8 +39,6 @@ interface ProfileManifest {
      */
     desktopNextScheduleBundle?: number
     desktopNextOnboarding?: { version: number; outcome: 'completed' | 'skipped'; accountPending?: boolean }
-    /** Names recovery removed from `profile.bundles`; a UI ledger, never a policy. */
-    desktopNextDeselectedBundles?: string[]
     profile: { bundles: string[] }
   }
   [key: string]: unknown
@@ -120,6 +122,7 @@ export class NextProfiles {
     const existing = existsSync(join(dir, 'package.json'))
     if (!existing) initProfile(dir, WEB_BUNDLES)
     if (existing) {
+      removePrivateFileBom(join(dir, 'package.json'))
       const manifest = this.manifest(name)
       if (manifest.dsh.profile.bundles.includes('dsh-desktop-next')) {
         // Retire the former Next-specific selection from the shared manifest.
@@ -189,7 +192,7 @@ export class NextProfiles {
         || Object.keys(value).some(key => !['features', 'computerUse'].includes(key))) throw new Error('Invalid onboarding choices')
       const choices = value as Record<string, unknown>
       const features = parseFeatures(choices.features)
-      if ([features.market, features.dshMarket, features.officialMarket].filter(Boolean).length > 1) throw new Error('Select only one plugin market')
+      if (features.market && features.dshMarket) throw new Error('Select only one plugin market')
       if (typeof choices.computerUse !== 'boolean') throw new Error('Invalid Computer Use choice')
       originalPatch = readPrivateFile(patchPath)
       nextPatch = computerUsePatch(originalPatch ?? '[]\n', choices.computerUse).text
@@ -249,27 +252,88 @@ export class NextProfiles {
     if (!value || !Array.isArray(value.dsh?.profile?.bundles) || value.dsh.profile.bundles.some((item: unknown) => typeof item !== 'string')) throw new Error('Invalid Next Profile manifest')
     return value
   }
-  /** The shell must stop this profile's Host before calling recovery. */
-  async recover(name: string): Promise<string | undefined> {
+  /**
+   * Remove the official on-demand bundles (the Codex and Claude Code subagents, Computer Use) that this Profile
+   * installed for another DSH release, as removing them in Plugins does. Their release pins every DSH package they
+   * depend on, and the Profile's hoisted pnpm layout puts those packages at its top level, where the runtime resolver
+   * prefers them to the installation's own: once this application runs another release, core rows load the old
+   * packages or are denied, so the subagent tools disappear, or the Host stops at storage-domain. The bundles
+   * themselves no longer match the release either. pnpm removes them offline, which prunes the pinned packages, and
+   * they leave the selection; Plugins then offers them as not installed, and switching one on installs the current release.
+   * @param name - Profile name.
+   * @param pnpm - The bundled pnpm.
+   * @param runtimeVersion - The DSH release this installation runs.
+   * @returns The bundles removed; empty when none was installed for another release.
+   */
+  removeStaleOnDemandBundles(name: string, pnpm: ProfilePnpmInvocation, runtimeVersion = getDshRuntimeVersion()): string[] {
+    const dir = this.directory(name)
+    const declared = this.manifest(name).dependencies
+    const dependencies = isRecord(declared) ? declared : {}
+    const stale = ON_DEMAND_BUNDLES.filter((bundle) => {
+      if (!Object.hasOwn(dependencies, bundle)) return false
+      // The installed copy decides; a dependency pnpm never placed keeps the exact version it was saved with.
+      let version = dependencies[bundle]
+      try { version = (JSON.parse(readFileSync(join(dir, 'node_modules', bundle, 'package.json'), 'utf8')) as { version?: unknown }).version }
+      catch { /* not installed */ }
+      return version !== runtimeVersion
+    })
+    if (stale.length === 0) return []
+    const run = spawnSync(pnpm.command, [...pnpm.args, '--config.offline=true', 'remove', ...stale], {
+      cwd: dir, env: { ...process.env, ...pnpm.env }, encoding: 'utf8', timeout: ON_DEMAND_REMOVAL_TIMEOUT_MS, windowsHide: true,
+    })
+    if (run.error !== undefined) throw run.error
+    if (run.status !== 0) throw new Error(`pnpm remove exited with ${String(run.status)}: ${`${run.stdout}${run.stderr}`.trim().slice(-2_000)}`)
+    const manifest = this.manifest(name)
+    manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(bundle => !stale.includes(bundle))
+    atomicJson(join(dir, 'package.json'), manifest)
+    return stale
+  }
+  /**
+   * Repair a Profile as upstream Desktop's plugin recovery does, after a complete backup: the Profile
+   * patch moves beside itself as `cordis.patch.yml.bak-<time>` and only the Web template's bundles stay
+   * enabled; other manifest fields and installed packages remain. Remote control and Market are turned
+   * off, and Desktop setup runs again because the repair reset the choices it made.
+   * The shell must stop this profile's Host before calling recovery.
+   * @returns The backup of the manifest, Profile patch and feature switches, which can restore all three.
+   */
+  async recover(name: string): Promise<string> {
     const dir = this.directory(name)
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     return withFileLock(join(dir, 'lock'), async () => {
       const backup = new NextRecovery(this).backup(name, 'before-profile-repair')
-      let manifest: Record<string, unknown> = { name, private: true }
-      try {
-        const value: unknown = JSON.parse(readPrivateFile(join(dir, 'package.json')) ?? '{}')
-        if (value && typeof value === 'object' && !Array.isArray(value)) manifest = value as Record<string, unknown>
-      } catch { /* The original bytes have already been backed up. */ }
-      // Keep installed dependencies, but remove malformed activation metadata.
-      const onboarding = (manifest.dsh as Partial<ProfileManifest['dsh']> | undefined)?.desktopNextOnboarding
-      manifest.dsh = { profile: { bundles: WEB_BUNDLES },
-        ...(onboarding?.version === 1 && ['completed', 'skipped'].includes(onboarding.outcome) ? { desktopNextOnboarding: onboarding } : {}) }
-      atomicJson(join(dir, 'package.json'), manifest)
+      removePrivateFileBom(join(dir, 'package.json'))
+      // Upstream repairs only a manifest it can update; the original bytes of a replaced one are in the backup.
+      const replacement = manifestForRepair(name, readPrivateFile(join(dir, 'package.json')))
+      if (replacement !== undefined) atomicJson(join(dir, 'package.json'), replacement)
+      sanitizeProfile('dsh-desktop-next', dir, WEB_BUNDLES)
+      const repaired = this.manifest(name)
+      delete repaired.dsh.desktopNextOnboarding
+      atomicJson(join(dir, 'package.json'), repaired)
       atomicText(join(dir, 'cordis.patch.yml'), '[]\n')
       this.setFeatures(name, { remoteControl: false, market: false })
-      return readPrivateFile(join(backup, 'cordis.patch.yml')) === undefined ? undefined : join(backup, 'cordis.patch.yml')
+      return backup
     })
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Decide whether upstream's repair can update a manifest as it is.
+ * @param name - The Profile, named in a replacement manifest.
+ * @param text - The manifest bytes, when the file exists.
+ * @returns undefined for a manifest whose `dsh` and `dsh.profile` are objects where present; otherwise the
+ *   manifest to write first: its other fields when it is a JSON object, or only the Profile name.
+ */
+function manifestForRepair(name: string, text: string | undefined): Record<string, unknown> | undefined {
+  let value: unknown
+  try { value = JSON.parse(text ?? 'null') } catch { value = undefined }
+  if (!isRecord(value)) return { name, private: true }
+  const { dsh } = value
+  if (dsh === undefined || (isRecord(dsh) && (dsh.profile === undefined || isRecord(dsh.profile)))) return undefined
+  return { ...value, dsh: {} }
 }
 
 /**
@@ -288,12 +352,32 @@ function retireLinkProjections(projectDir: string): void {
   }
 }
 
-/** Add product capabilities without replacing the upstream Web presentation. */
-export function loadNextProfile(projectDir: string, home: string, installAnchor = NEXT_PACKAGE): Profile {
+/**
+ * Remove the official on-demand bundles a Profile installed for another DSH release before the Host resolves its
+ * packages (see {@link NextProfiles.removeStaleOnDemandBundles}). A failed removal must not keep the Host from
+ * starting; the next launch retries.
+ */
+function retireStaleOnDemandBundles(manager: NextProfiles, name: string, pnpm: ProfilePnpmInvocation): void {
+  try {
+    const removed = manager.removeStaleOnDemandBundles(name, pnpm)
+    if (removed.length > 0) {
+      process.stderr.write(`dsh-desktop-next: removed ${removed.join(', ')} from Profile ${name}: installed for another DSH release than ${getDshRuntimeVersion()}; switching one on in Plugins installs this release\n`)
+    }
+  } catch (cause) {
+    process.stderr.write(`dsh-desktop-next: could not remove on-demand bundles of another DSH release from Profile ${name}: ${String(cause)}\n`)
+  }
+}
+
+/**
+ * Add product capabilities without replacing the upstream Web presentation.
+ * @param pnpm - The bundled pnpm; the Host passes it so that on-demand bundles of another DSH release leave the Profile first.
+ */
+export function loadNextProfile(projectDir: string, home: string, installAnchor = NEXT_PACKAGE, pnpm?: ProfilePnpmInvocation): Profile {
   const manager = new NextProfiles(home)
   if (manager.directory(basename(projectDir)) !== resolve(projectDir)) throw new Error('Profile must belong to Next home')
   manager.ensure(basename(projectDir))
   retireLinkProjections(projectDir)
+  if (pnpm !== undefined) retireStaleOnDemandBundles(manager, basename(projectDir), pnpm)
   // Upstream bundle discovery walks physical node_modules before installing its
   // runtime resolver. Project only this application's bundle, not its dependency
   // tree; the alpha.2 runtime resolver owns all other package fallbacks. No
